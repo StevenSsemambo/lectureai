@@ -23,6 +23,7 @@ import { ConceptTable, MisconceptionList } from "./learning/ClassInsights.jsx";
 import MasteryPanel from "./learning/MasteryPanel.jsx";
 import RosterPanel from "./learning/RosterPanel.jsx";
 import { moduleToSetup, applyModuleSave, removeModule, duplicateModule, moveItem, blankSlide, courseDeleteConfirmed, nextActiveCourseId } from "./courseCrud.js";
+import { looksLikeEmail, accountLabel, recoveryCodeLooksValid, passwordError, recoveryCodeFile, friendlyAccountError } from "./accountHelpers.js";
 import { usernameError, normalizeUsername, fullNameError, cleanFullName, suggestUsername, friendlySignupError } from "./studentProfile.js";
 import PracticePanel from "./learning/PracticePanel.jsx";
 import { planForSlide, adaptationPrompt, adaptWordBudget, adaptationLabel, emptySession, conceptsMatch, EXPLAIN_REQUESTS } from "./learning/adaptation.js";
@@ -359,11 +360,34 @@ async function fetchStudentProfile(session) {
 }
 async function createStudentProfile(session, { username, fullName }) {
   try {
-    await supabaseRequest("/student_profiles", { method: "POST", body: JSON.stringify({ user_id: session.user.id, username: normalizeUsername(username), full_name: cleanFullName(fullName) }) }, session.accessToken);
+    await supabaseRequest("/student_profiles", { method: "POST", body: JSON.stringify({ user_id: session.user.id, username: normalizeUsername(username), full_name: cleanFullName(fullName), role: "student" }), headers: { Prefer: "return=minimal" } }, session.accessToken);
     return { ok: true };
   } catch (e) {
     return { ok: false, taken: /409|23505|duplicate/i.test(String(e && e.message)), message: String((e && e.message) || "") };
   }
+}
+
+// Calls the `account` Edge Function (sign-up, username sign-in, password reset by recovery code).
+async function accountRequest(action, body) {
+  let res;
+  try {
+    res = await fetch(`${SUPABASE_URL}/functions/v1/account`, {
+      method: "POST",
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ action, ...body }),
+    });
+  } catch (e) {
+    const err = new Error(e && e.message ? e.message : "Failed to fetch");
+    err.status = 0;
+    throw err;
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error((data.error || `Request failed (${res.status})`) + (data.detail ? ` [${String(data.detail).slice(0, 120)}]` : ""));
+    err.status = res.status;
+    throw err;
+  }
+  return data;
 }
 
 function toSession(data) {
@@ -1385,25 +1409,29 @@ function RoleSelectScreen({ onSelectRole, onOpenLegal }) {
 // database to scope writes to.
 // ---------------------------------------------------------------------------
 function AuthScreen({ onAuthenticated, onBack, onOpenLegal, role = "lecturer" }) {
-  const [mode, setMode] = useState("signin"); // signin | signup
-  const [email, setEmail] = useState("");
+  const [mode, setMode] = useState("signin"); // signin | signup | forgot
+  const [identifier, setIdentifier] = useState(""); // sign-in / forgot: username (or an older account's email)
   const [password, setPassword] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-  const [confirmNotice, setConfirmNotice] = useState(false);
   const [fullName, setFullName] = useState("");
   const [username, setUsername] = useState("");
   const [usernameTouched, setUsernameTouched] = useState(false);
   const [usernameState, setUsernameState] = useState(""); // "", checking, free, taken
-  const studentSignup = role === "student" && mode === "signup";
+  const [recovery, setRecovery] = useState(""); // forgot: the recovery code
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [info, setInfo] = useState("");
+  const [codeScreen, setCodeScreen] = useState(null); // { code, username, session, reason }
+  const [saved, setSaved] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const signup = mode === "signup";
 
-  // Suggest a username from the name until the student types their own.
+  // Suggest a username from the name until the person types their own.
   useEffect(() => {
-    if (studentSignup && !usernameTouched) setUsername(suggestUsername(fullName));
-  }, [fullName, studentSignup, usernameTouched]);
+    if (signup && !usernameTouched) setUsername(suggestUsername(fullName));
+  }, [fullName, signup, usernameTouched]);
   // Check the username is free (after a short pause while typing).
   useEffect(() => {
-    if (!studentSignup) return undefined;
+    if (!signup) return undefined;
     const u = normalizeUsername(username);
     if (usernameError(u)) { setUsernameState(""); return undefined; }
     setUsernameState("checking");
@@ -1412,100 +1440,153 @@ function AuthScreen({ onAuthenticated, onBack, onOpenLegal, role = "lecturer" })
       checkUsernameAvailable(u).then((free) => { if (!cancelled) setUsernameState(free === null ? "" : free ? "free" : "taken"); });
     }, 350);
     return () => { cancelled = true; clearTimeout(t); };
-  }, [username, studentSignup]);
+  }, [username, signup]);
+
+  const switchMode = (m) => { setMode(m); setError(""); setInfo(""); setPassword(""); };
 
   const submit = async () => {
-    if (!email.trim() || !password) {
-      setError("Enter an email and password.");
+    setError(""); setInfo("");
+    if (mode === "signin") {
+      if (!identifier.trim() || !password) { setError("Enter your username and password."); return; }
+      setBusy(true);
+      try {
+        // Older accounts signed up with a real email and still sign in with it.
+        const session = looksLikeEmail(identifier)
+          ? await signInUser(identifier.trim(), password)
+          : toSession((await accountRequest("signin", { username: normalizeUsername(identifier), password })).session);
+        onAuthenticated(session);
+      } catch (e) {
+        setError(friendlyAccountError(e.message, e.status));
+        setBusy(false);
+      }
       return;
     }
-    if (studentSignup) {
-      const problem = fullNameError(fullName) || usernameError(username);
+    if (mode === "signup") {
+      const problem = fullNameError(fullName) || usernameError(username) || passwordError(password);
       if (problem) { setError(problem); return; }
       if (usernameState === "taken") { setError("That username is taken. Try another."); return; }
+      setBusy(true);
+      try {
+        const r = await accountRequest("signup", { fullName: cleanFullName(fullName), username: normalizeUsername(username), password, role });
+        setCodeScreen({ code: r.recoveryCode, username: r.username, session: r.session ? toSession(r.session) : null, reason: "signup" });
+      } catch (e) {
+        setError(friendlyAccountError(e.message, e.status));
+      }
+      setBusy(false);
+      return;
     }
-    setError("");
-    setConfirmNotice(false);
+    // forgot password
+    if (!identifier.trim() || !recoveryCodeLooksValid(recovery)) { setError("Enter your username and your 20-character recovery code."); return; }
+    const pw = passwordError(password);
+    if (pw) { setError(pw); return; }
     setBusy(true);
     try {
-      if (mode === "signup") {
-        const result = await signUpUser(email.trim(), password, studentSignup ? { full_name: cleanFullName(fullName), username: normalizeUsername(username) } : null);
-        if (result.needsConfirmation) {
-          setConfirmNotice(true);
-          setBusy(false);
-          return;
-        }
-        onAuthenticated(result.session);
-      } else {
-        const session = await signInUser(email.trim(), password);
-        onAuthenticated(session);
-      }
+      const r = await accountRequest("reset", { username: normalizeUsername(identifier), recoveryCode: recovery, newPassword: password });
+      setCodeScreen({ code: r.recoveryCode, username: normalizeUsername(identifier), session: null, reason: "reset" });
     } catch (e) {
-      setError(friendlySignupError(e.message) || "Something went wrong — try again.");
-      setBusy(false);
+      setError(friendlyAccountError(e.message, e.status));
     }
+    setBusy(false);
   };
+
+  const copyCode = async () => {
+    try { await navigator.clipboard.writeText(codeScreen.code); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch (e) { /* clipboard unavailable */ }
+  };
+  const downloadCode = () => {
+    try {
+      const url = URL.createObjectURL(new Blob([recoveryCodeFile(codeScreen.username, codeScreen.code)], { type: "text/plain" }));
+      const a = document.createElement("a");
+      a.href = url; a.download = `semai-recovery-code-${codeScreen.username}.txt`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) { /* download unavailable */ }
+  };
+  const finishCode = () => {
+    const cs = codeScreen;
+    setCodeScreen(null); setSaved(false);
+    if (cs.session) { onAuthenticated(cs.session); return; }
+    setIdentifier(cs.username); setPassword("");
+    setMode("signin");
+    setInfo(cs.reason === "reset" ? "Password changed. Sign in with your new password." : "Account created. Sign in with your username and password.");
+  };
+
+  const title = codeScreen ? (codeScreen.reason === "reset" ? "Password changed" : "Save your recovery code") : mode === "signup" ? "Create your account" : mode === "forgot" ? "Reset your password" : "Sign in";
+  const sub = codeScreen
+    ? "This is the only way to reset your password if you forget it, because accounts don't use an email."
+    : role === "lecturer"
+    ? mode === "signup" ? "Choose a username. Your courses stay uniquely yours, and nobody else can edit them." : mode === "forgot" ? "Use the recovery code you saved when you created your account." : "Sign in with your username to see and manage your courses."
+    : mode === "signup" ? "Choose a username so your learning history follows you across sessions." : mode === "forgot" ? "Use the recovery code you saved when you created your account." : "Sign in with your username to see your session history.";
 
   return (
     <div className="join-screen">
       <div className="join-card">
         <div className="join-eyebrow">SEMAI · {role === "lecturer" ? "Lecturer" : "Student"}</div>
-        <h1 className="join-title">{mode === "signup" ? "Create your account" : "Sign in"}</h1>
-        <p className="join-sub">
-          {role === "lecturer"
-            ? mode === "signup"
-              ? "So your courses are uniquely yours, not editable by anyone else."
-              : "Sign in to see and manage your courses."
-            : mode === "signup"
-            ? "So your learning history follows you across sessions."
-            : "Sign in to see your session history."}
-        </p>
+        <h1 className="join-title">{title}</h1>
+        <p className="join-sub">{sub}</p>
 
-        {confirmNotice ? (
-          <div className="db-status ok" style={{ display: "block", textAlign: "left" }}>
-            Account created — check {email} for a confirmation link, then come back and sign in.
+        {codeScreen ? (
+          <div>
+            <div role="status" aria-label="Recovery code" style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 20, letterSpacing: 1.5, padding: "14px 12px", margin: "0 0 12px", background: "#1A1F27", border: "1px solid #2F6F4F", borderRadius: 10, wordBreak: "break-all", userSelect: "all" }}>{codeScreen.code}</div>
+            <div style={{ display: "flex", gap: 8, marginBottom: 12, justifyContent: "center", flexWrap: "wrap" }}>
+              <button className="nav-btn" onClick={copyCode}>{copied ? "Copied" : "Copy"}</button>
+              <button className="nav-btn" onClick={downloadCode}>Download as a file</button>
+            </div>
+            <p className="join-hint" style={{ textAlign: "left" }}>
+              Your username is <strong>{codeScreen.username}</strong>. Screenshot or save this code now: it is shown only once. Anyone who has it can reset your password, so keep it private.
+            </p>
+            <label className="consent-row">
+              <input type="checkbox" checked={saved} onChange={(e) => setSaved(e.target.checked)} />
+              <span>I have saved my recovery code.</span>
+            </label>
+            <button className="join-btn" disabled={!saved} onClick={finishCode}>Continue</button>
           </div>
         ) : (
           <>
-            {studentSignup && (
+            {info && <div className="db-status ok" role="status" style={{ display: "block", textAlign: "left" }}>{info}</div>}
+
+            {signup && (
               <>
-                <input className="join-input" placeholder="Your full name (as on your student record)" aria-label="Full name" autoComplete="name" value={fullName} onChange={(e) => setFullName(e.target.value)} />
+                <input className="join-input" placeholder={role === "lecturer" ? "Your full name" : "Your full name (as on your student record)"} aria-label="Full name" autoComplete="name" value={fullName} onChange={(e) => setFullName(e.target.value)} />
                 <input className="join-input" placeholder="Choose a username" aria-label="Username" autoComplete="username" autoCapitalize="none" spellCheck={false} value={username} onChange={(e) => { setUsernameTouched(true); setUsername(e.target.value); }} />
                 <div role="status" style={{ fontSize: 12, margin: "-4px 0 8px", textAlign: "left", color: usernameState === "taken" ? "#FFB4A6" : usernameState === "free" ? "#BFEAD3" : "#8890A0" }}>
-                  {usernameState === "checking" ? "Checking…" : usernameState === "free" ? `@${normalizeUsername(username)} is available` : usernameState === "taken" ? "That username is taken" : usernameError(username) && username ? usernameError(username) : "Your lecturer sees your name and username, so use your real name."}
+                  {usernameState === "checking" ? "Checking…" : usernameState === "free" ? `@${normalizeUsername(username)} is available` : usernameState === "taken" ? "That username is taken" : usernameError(username) && username ? usernameError(username) : "You'll sign in with this username. Use your real name so people know who you are."}
                 </div>
               </>
             )}
-            <input className="join-input" type="email" placeholder="Email" aria-label="Email address" value={email} onChange={(e) => setEmail(e.target.value)} />
+            {!signup && (
+              <input className="join-input" placeholder={mode === "signin" ? "Username" : "Your username"} aria-label="Username or email" autoComplete="username" autoCapitalize="none" spellCheck={false} value={identifier} onChange={(e) => setIdentifier(e.target.value)} />
+            )}
+            {mode === "forgot" && (
+              <input className="join-input" placeholder="Recovery code (XXXXX-XXXXX-XXXXX-XXXXX)" aria-label="Recovery code" autoCapitalize="characters" spellCheck={false} value={recovery} onChange={(e) => setRecovery(e.target.value)} />
+            )}
             <input
               className="join-input"
               type="password"
-              placeholder="Password"
-              aria-label="Password"
+              placeholder={mode === "forgot" ? "New password (8+ characters)" : signup ? "Password (8+ characters)" : "Password"}
+              aria-label={mode === "forgot" ? "New password" : "Password"}
+              autoComplete={mode === "signin" ? "current-password" : "new-password"}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && submit()}
             />
             {error && <div className="setup-error" style={{ justifyContent: "center" }}><AlertTriangle size={13} /> {error}</div>}
             <button className="join-btn" disabled={busy} onClick={submit}>
-              {busy ? <Loader2 className="spin" size={14} /> : null} {mode === "signup" ? "Create account" : "Sign in"}
+              {busy ? <Loader2 className="spin" size={14} /> : null} {signup ? "Create account" : mode === "forgot" ? "Set new password" : "Sign in"}
             </button>
-            {mode === "signup" && <div style={{ fontSize: 12, color: "#8890A0", marginTop: 10 }}>By creating an account you agree to the Terms of Service and Privacy Policy.</div>}
+            {signup && <div style={{ fontSize: 12, color: "#8890A0", marginTop: 10 }}>No email needed. You'll get a recovery code in the next step. By creating an account you agree to the Terms of Service and Privacy Policy.</div>}
             {onOpenLegal && <LegalLinks onOpen={onOpenLegal} />}
           </>
         )}
 
-        <button
-          className="skip-link"
-          onClick={() => {
-            setMode((m) => (m === "signup" ? "signin" : "signup"));
-            setError("");
-            setConfirmNotice(false);
-          }}
-        >
-          {mode === "signup" ? "Already have an account? Sign in" : "New here? Create an account"}
-        </button>
-        <button className="skip-link" onClick={onBack}>← Back to role select</button>
+        {!codeScreen && (
+          <>
+            {mode === "signin" && <button className="skip-link" onClick={() => switchMode("forgot")}>Forgot your password?</button>}
+            <button className="skip-link" onClick={() => switchMode(signup || mode === "forgot" ? "signin" : "signup")}>
+              {signup || mode === "forgot" ? "Already have an account? Sign in" : "New here? Create an account"}
+            </button>
+            <button className="skip-link" onClick={onBack}>← Back to role select</button>
+          </>
+        )}
       </div>
     </div>
   );
@@ -2008,7 +2089,7 @@ function ModuleSetupScreen({ course, setup, patchSetup, onSaveModule, onSaveAndP
 function JoinScreen({ courses, onJoin, onBack, onOpenLegal, studentSession, studentProfile, onSaveProfile, onStudentSignIn, onStudentSignOut, onViewMyHistory }) {
   const [selectedCourseId, setSelectedCourseId] = useState(null);
   const [selectedModuleId, setSelectedModuleId] = useState(null);
-  const [name, setName] = useState(studentProfile ? studentProfile.fullName : studentSession ? studentSession.user.email.split("@")[0] : "");
+  const [name, setName] = useState(studentProfile ? studentProfile.fullName : studentSession ? accountLabel(studentSession.user.email) : "");
   useEffect(() => { if (studentProfile) setName(studentProfile.fullName); }, [studentProfile]);
   // A signed-in student with no profile yet picks a real name and username first.
   const needsProfile = !!studentSession && studentProfile === null;
@@ -2109,7 +2190,7 @@ function JoinScreen({ courses, onJoin, onBack, onOpenLegal, studentSession, stud
 
         {studentSession ? (
           <div className="signed-in-badge">
-            {studentProfile ? `Joining as ${studentProfile.fullName} (@${studentProfile.username})` : `Signed in as ${studentSession.user.email}`}
+            {studentProfile ? `Joining as ${studentProfile.fullName} (@${studentProfile.username})` : `Signed in as ${accountLabel(studentSession.user.email)}`}
             <button className="skip-link inline" onClick={onStudentSignOut}>Not you?</button>
           </div>
         ) : null}
@@ -2403,7 +2484,7 @@ function MyHistoryScreen({ session, courses, onBack, onAccountDeleted, onOpenLeg
   return (
     <div className="setup-screen">
       <div className="setup-header">
-        <div className="join-eyebrow">SEMAI · {session.user.email}</div>
+        <div className="join-eyebrow">SEMAI · {accountLabel(session.user.email)}</div>
         <h1 className="join-title">My learning history</h1>
         <p className="join-sub">Every lecture you've attended, across every course.</p>
         <button className="skip-link" onClick={onBack}>← Back</button>
@@ -4650,7 +4731,7 @@ export default function SEMAIApp() {
         <LecturerDashboard
           courses={myCourses}
           dbStatus={dbStatus}
-          lecturerEmail={session?.user?.email}
+          lecturerEmail={session ? accountLabel(session.user.email) : undefined}
           account={supabaseEnabled() ? session : null}
           onAccountDeleted={handleLecturerAccountDeleted}
           onOpenLegal={openLegal}
