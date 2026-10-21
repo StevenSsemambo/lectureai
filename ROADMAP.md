@@ -1,0 +1,231 @@
+# SEMAI — Development Roadmap
+
+## Status (updated 8 Oct 2026)
+
+| Phase | Status |
+|---|---|
+| 0. Harden | **Done** — RLS review + hardening migration, client error logging (`src/errorLogging.jsx`, `client_errors` table), AI proxy hardening (v5: header key, model allowlist, size cap, best-effort per-IP rate limit) |
+| 1. AI confidence & escalation | **Done** (anonymous saves fixed with `return=minimal`) |
+| 2. Lecturer analytics & session history | **Done** (same fix) |
+| 3. Student identity | **Done** |
+| 4. Accessibility | **Done** (contrast check not independently verified) |
+| 5. Privacy, terms, data controls | **Built, pending review** — draft Privacy Policy + Terms (`src/legal.jsx`, placeholders must be filled, lawyer review needed), in-app "Download my data" and "Delete my account" |
+| 6. Multi-student real-time classrooms | Not started (deliberately gated on a real pilot) |
+| 7. LMS / SSO | Not started (gated on an institutional sandbox) |
+
+v1.2.0 (8 Oct 2026): welcome/splash screen with build stamp; lecture-notes PDF now always reachable (top-bar "Notes (PDF)" button, covers the slides reached; completion banner is sticky). Proxy v6 raised rate limits so notes generation isn't throttled.
+
+v1.3.0 (8 Oct 2026): **Slide kit** (`src/slideKit/`). Eight slide types (concept, definition, comparison,
+worked example, code walkthrough, diagram, plot, summary); KaTeX maths; two-pass deck generation (outline, then one call
+per slide) with automatic checks: LaTeX must parse, worked-example arithmetic is recomputed with mathjs, Mermaid diagrams
+must parse, plots must compile — problems go back to the AI once, anything still broken is stripped before students see it.
+Worked examples reveal step by step while the lecturer speaks; code walkthroughs highlight the lines being explained;
+multi-language highlighter (Java, C, C++, Python, JS/TS, VB, SQL, HTML/CSS); in-browser Run for JavaScript only (Java/C/C++/VB
+need an execution service — not built; their expected output is AI-written and labelled as such). Notes PDF includes
+formulas, steps, tables, diagrams, graphs and numbered code. Run the tests with `npm test`.
+
+v1.4.0 (9 Oct 2026): **Multi-provider AI failover.** `gemini-proxy` v8 retries Gemini briefly, then (for authoring calls) falls back
+to the lighter Gemini model, then to Groq (`openai/gpt-oss-120b`) on 5xx, 429 or network failure. Needs the optional secret
+`GROQ_API_KEY`; without it behaviour is unchanged. The key lives only in Supabase secrets, never in the repo.
+
+v1.5.0 (9 Oct 2026): **Timing measurements.** Every AI call (kind, provider, model, ok, status, client and server ms), the voice start
+delay (browser vs ElevenLabs, with download time), and the live Q&A stages (question to "Yes, Sam?", silence before the answer,
+question to answer voice) are recorded to the write-only `ai_timings` table (durations only; summary SQL in
+`supabase/migrations/20261009_ai_timings.sql`). Lecturer dashboard has "AI health and speed": a live Gemini + Groq check and a
+per-session speed table. Proxy v9/10 returns provider/model/serverMs and supports the signed-in-only `{probe:true}` check.
+
+v1.5.1 (9 Oct 2026): **Follow-along scrolling.** Replaced the proportional (and often out-of-sync) auto-scroll. Each spoken sentence is
+matched to the on-screen block it is about (bullet, formula, table row, definition, diagram/plot caption, takeaway) by weighted word
+overlap (`src/slideKit/focus.js`); that block is highlighted and scrolled into the comfortable band below the sticky title, and nothing
+moves when there is no clear match. Worked examples and code walkthroughs keep their exact step/line sync. Manual scrolling still pauses
+following ("Follow the lecturer" resumes). Narration prompts now ask the lecturer to follow the slide's order and wording.
+
+v1.6.0 (10 Oct 2026): **Learning analytics, Phase A (foundations).** Append-only `learning_events` log (slide views + dwell, navigation,
+autopilot toggles, hand raises, questions with the on-screen block they concerned, AI answer confidence, flags, "Got it / Unsure / I'm lost"
+signals, comprehension-check shown/answered/skipped, notes downloads, session start/end) with strict row-level security (verified by 16
+database tests: anonymous students can write but never read; lecturers read only their own courses; students read their own; nothing is
+editable). De-identified by design: no names/emails, a random browser pseudonym + optional account id. Every generated slide now carries
+`concepts`, `prerequisites` and one multiple-choice `check` (distractors reflect misconceptions; invalid checks are dropped, never shown);
+the lecturer asks it after the slide, records the answer, time and self-rated confidence, and speaks the explanation. "I'm lost" re-explains
+immediately. Optional research-consent checkbox on joining (stored on the session + every event). Lecturer **Slide analytics** panel
+(`module_slide_stats`): per-slide viewers, dwell, quiz accuracy, signals, questions, and a "needs attention" score that stays blank until
+enough students have data. Privacy policy updated. Next: Phase B (misconception grouping, flagged-question review, suggestions), Phase C
+(student mastery model + adaptive lecturing), Phase D (research exports/experiments), Phase E (pilot evaluation).
+
+v1.7.0 (10 Oct 2026): **Learning analytics, Phase B.** Lecturer view now shows *understanding by concept*, *common wrong answers*
+(each wrong option students choose most is a named misconception; "very sure" wrong answers flag firmly held mistakes), concepts the class is
+finding hard, and an on-demand AI **"Suggest improvements"** for slides flagged "needs attention". **The lecturer teaches the AI:** on a flagged
+student question the lecturer can write the correct answer (the question is reworded generally, no names); the AI lecturer then bases its
+answer on that approved answer when a student asks something similar (`module_corrections`, SECURITY DEFINER, approved pairs only; matching is
+deliberately strict so an unrelated approved answer is never injected). **Student mastery model** (`src/learning/mastery.js`): per-concept
+Beta-Bernoulli estimate with recency decay, guesses counting half and confident-wrong answers counting 1.5x; "What I've learned" on the student's
+history page shows strengths, "revise first" and whether their confidence is well calibrated. Verified with live database tests (breakdown
+aggregation, per-lecturer isolation, approval flow, length limits, no leakage of student wording/names).
+
+v1.7.1 (11 Oct 2026): **Bigger slide display.** The lecture room no longer has a 720px height cap (it uses the full window, `100dvh`);
+padding above/below the slide, in the top bar, the column and the control bar was cut by about half; "Prev / status / Next" and "How is this going?"
+now share one row; a real **Full screen** button hides the browser's own toolbars; the code editor fills all the height the stage has and
+scrolls only inside itself; diagrams and plots scale to the available height instead of forcing a scroll. `.tests/t_layout.mjs` guards the
+numbers so the layout can't quietly regress.
+
+v1.8.0 (11 Oct 2026): **Analytics Phase C: adaptive lecturing.** The AI lecturer now teaches each slide according to the student's
+understanding (`src/learning/adaptation.js`): *simplify* (short sentences, terms defined, one everyday example, step by step) when a concept is
+weak/slipping in the student's history OR they missed a question / tapped "I'm lost" a moment ago (this session outweighs old history); *brisk*
+(about 60% of the usual words, one deeper insight) only when every concept is strong with >= 3 answers; and a one-sentence *reminder* of a weak
+prerequisite, once per session. Safeguards, all tested: it only changes HOW something is explained (never skips a slide or quiz, never affects
+assessment); every adaptation shows the student a plain-language reason; a "Personalised on/off" switch turns it all off; one old answer is
+never enough evidence; prompts contain instructions only (no names/scores). Students can also ask "Explain differently" (another example / step
+by step / go deeper / why it matters), logged as `adapt_request`. The welcome mentions what will be revisited. New events: `adapt_applied`,
+`adapt_request`, `practice_answer`; quiz answers now record `slide_type` and `adapt_level` so we can later ask "did adapting help?" (selection
+effects: weaker students get simplified explanations, so raw comparisons are confounded; an experiment would need randomisation + consent).
+**Revision practice + spaced revision:** history page shows when each concept is due again (weak 2 days, developing 5, strong 14) and a
+"Practise this" button: AI writes 4 questions grounded in the lecture that taught the concept (validated, answer positions shuffled),
+and practice answers count towards mastery.
+
+v1.9.0 (12 Oct 2026): **Pause + brand.** The cosmetic mic button is replaced by a real **Pause/Resume**: the student can stop the lecture
+(read slowly, take a call), the speech holds, typing holds, and the lecturer greets them on return in proportion to the break (nothing under
+15s). The lecture also **auto-pauses** if the tab is left / screen locked for 4s (the student decides when to resume). Pauses are logged as
+`pause`/`resume` events (reason manual|away, duration, slide) and session totals ride on `session_end`. Used as RHYTHM and PACING signals only,
+never as a score on a student: lecturers see class-level "slides where many students pause" (manual pauses only; away pauses say nothing about the
+slide) and a Paused column; each student sees their own focus rhythm on their history page; after ~25 unbroken minutes the lecturer gently
+suggests a break. New brand mark (open book + network feeding a guide node = AI-guided learning), generated favicon and PWA/maskable icons
+(`node scripts/make-icons.mjs`), and a redesigned splash: living network background (reduced-motion safe, pauses when hidden), benefits,
+how-it-works, version stamp.
+
+Known limits: the proxy rate limiter is per running instance, not global; error logs
+have no automatic purge (see the retention note in `supabase/migrations/20261008_client_error_log.sql`).
+
+---
+
+**Purpose of this document:** an honest, ordered plan for taking SEMAI from
+"working demo" to a system credible for (a) university adoption and (b) a
+Y Combinator application. Phases are sequenced by what actually de-risks
+each of those conversations fastest — not by novelty or difficulty.
+
+A note on scope: this roadmap covers what's buildable in the codebase.
+Things like running an actual pilot, legal review of policy documents, and
+institutional sales conversations aren't engineering tasks — they're called
+out explicitly below where they matter, but they're on the founder, not on
+this list.
+
+---
+
+## Phase 0 — Harden what exists
+**Size: small · Blocking: nothing, do this first**
+
+Nothing here is a new feature — it's insurance against the product visibly
+breaking in front of a dean or a YC partner.
+
+- Client-side error logging (capture unhandled errors/rejections, persist
+  enough context to debug after the fact instead of guessing)
+- Final RLS/security review pass on the live database
+- Cleanup of any remaining rough edges surfaced during real use
+
+---
+
+## Phase 1 — AI confidence & escalation
+**Size: medium · Depends on: nothing**
+
+Flagged as the trust-determining feature from the earliest planning of this
+project and never actually built. Right now the AI answers every question
+with identical, full confidence, with no mechanism to say "I'm not sure."
+For an academic setting, this is the single biggest credibility gap — it's
+also the first question a skeptical lecturer or department will ask.
+
+- AI self-assesses confidence on generated answers (and pre-generated
+  explanations, where relevant)
+- Low-confidence answers are flagged honestly to the student rather than
+  delivered as fact
+- Flagged questions are recorded for the lecturer to review and correct
+  later (feeds into Phase 2's session history)
+
+---
+
+## Phase 2 — Lecturer analytics & session history
+**Size: medium-large · Depends on: nothing structurally, more useful after Phase 3**
+
+A lecture currently happens and leaves no trace once the room closes. This
+is what a lecturer or department will want to see in week one of any real
+pilot, and it's also concrete evidence of usage/impact for a YC application.
+
+- New database tables: persisted session records and transcripts
+- AI-generated session summary (what was covered, common questions,
+  rough engagement signal)
+- Lecturer dashboard view: past sessions per module, transcripts, flagged
+  questions from Phase 1, basic completion/engagement metrics
+
+---
+
+## Phase 3 — Student identity
+**Size: small · Depends on: existing lecturer auth (already built)**
+
+Students currently just type a name — no account, nothing persistent.
+Analytics from Phase 2 are much weaker without real identity behind them.
+
+- Extend the existing Supabase Auth setup to cover student accounts
+- Keep quick anonymous name-entry as a fallback for casual/trial use
+
+---
+
+## Phase 4 — Accessibility pass
+**Size: medium · Depends on: nothing**
+
+Many public universities treat this as a hard procurement requirement
+(WCAG/Section 508-style), not a preference.
+
+- Keyboard navigation audit across every screen
+- Screen-reader labels/landmarks
+- Color contrast check against the current dark theme
+- Visible running transcript during live lectures (the chat panel already
+  covers most of this — needs auditing/finishing, not rebuilding)
+
+---
+
+## Phase 5 — Privacy policy, terms, and data controls
+**Size: medium · Depends on: Phase 2 (need to know exactly what's stored first)**
+
+- Draft privacy policy and terms of service reflecting exactly what data
+  the system collects and stores (genuinely useful as a first draft for
+  pilot conversations — **needs a lawyer's review before it's binding on
+  anyone**, that part isn't something I can do)
+- Real data export/delete functionality — a policy promising deletion
+  needs an actual mechanism behind it, not just a paragraph
+
+---
+
+## Phase 6 — Multi-student real-time classrooms
+**Size: large — the biggest single item on this roadmap · Depends on: nothing technically, but sequenced last on purpose**
+
+Everything today is one student per session. A real classroom needs many
+students in one room, sharing one lecture, one raised-hand queue, and one
+lecturer able to moderate. This is a genuine rearchitecture — the AI's
+state has to live in one shared place (server-synced) instead of running
+independently inside each browser tab, the way it does now.
+
+Deliberately sequenced after Phases 1-5: it's the most expensive thing on
+this list to build, and a first pilot can reasonably start smaller than
+this. Don't build it speculatively — build it once a real pilot says it's
+the actual blocker.
+
+---
+
+## Phase 7 — LMS integration / SSO (Canvas, Moodle, etc.)
+**Size: large · Depends on: having an actual institutional sandbox to test against**
+
+The LTI/SSO handshake code itself is buildable in isolation, but it can't
+be genuinely validated without a real institution's test environment. This
+phase is realistically gated on having a pilot partner in hand — build it
+with them, not blind ahead of them.
+
+---
+
+## What's explicitly NOT on this list (and why)
+
+- **Running a pilot.** The single highest-leverage thing for a YC
+  application is real usage evidence, not more features. That's a
+  founder-led conversation, not an engineering task.
+- **Legal review of any policy document.** I can draft; a lawyer needs to
+  sign off before it's relied on.
+- **Institutional sales / procurement conversations.** Same as above —
+  this roadmap makes the product ready for those conversations, it doesn't
+  replace having them.
