@@ -11,7 +11,12 @@
 
 const DAY = 86400000;
 
-export function estimateMastery(events, now = Date.now(), { halfLifeDays = 21 } = {}) {
+// The estimate shown to students and lecturers now comes from Bayesian Knowledge Tracing (see bkt.js):
+// it allows for guessing, slips, learning and forgetting, and carries an honest range. The older
+// Beta-Bernoulli version stays below for comparison tests.
+export { estimateMasteryBKT as estimateMastery } from "./bkt.js";
+
+export function estimateMasteryBeta(events, now = Date.now(), { halfLifeDays = 21 } = {}) {
   const by = new Map();
   for (const e of events || []) {
     if (!e || !e.concept || typeof e.correct !== "boolean") continue;
