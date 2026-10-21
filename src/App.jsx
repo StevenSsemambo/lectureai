@@ -32,6 +32,7 @@ import { usernameError, normalizeUsername, fullNameError, cleanFullName, suggest
 import PracticePanel from "./learning/PracticePanel.jsx";
 import { planForSlide, adaptationPrompt, adaptWordBudget, adaptationLabel, emptySession, conceptsMatch, EXPLAIN_REQUESTS } from "./learning/adaptation.js";
 import { generatePractice } from "./learning/practice.js";
+import { pickDiagnostic, diagnosticLead, diagnosticNoGap, diagnosticGapPrompt, diagnosticGapFallback } from "./learning/diagnose.js";
 import { welcomeBackLine, createPauseTracker, breakNudgeDue, BREAK_NUDGE_TEXT, pauseHotspot, engagementSummary, focusRhythmText } from "./learning/pauses.js";
 import FlagReviewCard from "./learning/FlagReviewCard.jsx";
 import { newCheckState, chooseOption as chooseCheckState, finishCheck as finishCheckState, skipCheck as skipCheckState, feedbackSpeech } from "./slideKit/checkFlow.js";
@@ -1803,6 +1804,8 @@ function SlideAdvancedEditor({ slide: s, onChange }) {
           )}
           <LineEditor label="Concepts taught — comma separated (used to track each student's understanding)" rows={1} value={(s.concepts || []).join(", ")}
             onCommit={(t) => onChange({ concepts: t.split(",").map((x) => x.trim()).filter(Boolean).slice(0, 3) })} />
+          <LineEditor label="Builds on — earlier ideas students need first, comma separated (if a student keeps missing this slide's quiz, SEMAI checks these first)" rows={1} value={(s.prerequisites || []).join(", ")}
+            onCommit={(t) => onChange({ prerequisites: t.split(",").map((x) => x.trim()).filter(Boolean).slice(0, 3) })} />
         </>
       )}
 
@@ -3064,6 +3067,8 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
   const sessionAdaptRef = useRef(emptySession());
   const planLevelRef = useRef({});
   const lastEvidenceKeyRef = useRef("");
+  const diagnosedRef = useRef(new Set()); // concepts already investigated this lecture
+  const diagnosticRef = useRef(null); // always the latest runDiagnostic (assigned below)
   const masteryNow = () => estimateMastery([...historyRef.current, ...sessionEvidenceRef.current]);
   // The slide area scrolls to follow the lecturer; scrolling by hand pauses that.
   const stageRef = useRef(null);
@@ -3660,6 +3665,11 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
           if (!fbDone) await waitForIdle();
           setLecturerState2("idle");
           await sleep(700);
+          // missed it: is the real gap an earlier idea? (one short question, only if personalisation is on)
+          if (!outcome.correct && adaptOnRef.current && diagnosticRef.current) {
+            await diagnosticRef.current(index, check.concept, stale);
+            if (stale()) return;
+          }
         }
       }
 
@@ -3977,8 +3987,8 @@ ${NATURAL_SPEECH_STYLE}`;
     setActiveCheck((c) => {
       const r = finishCheckState(c, confidence);
       if (!r.event) return c;
-      track("check_answer", slideInfo(c.index), { ...r.event, slide_type: curriculum.slides[c.index] && curriculum.slides[c.index].type, adapt_level: planLevelRef.current[c.index] || "standard" });
-      const evidenceKey = `${c.index}:${c.chosen}`;
+      track("check_answer", slideInfo(c.index), { ...r.event, slide_type: curriculum.slides[c.index] && curriculum.slides[c.index].type, adapt_level: planLevelRef.current[c.index] || "standard", ...(c.diagnostic ? { diagnostic: true, for_concept: c.diagnostic.forConcept } : {}) });
+      const evidenceKey = `${c.diagnostic ? "d" : ""}${c.index}:${c.chosen}`;
       if (lastEvidenceKeyRef.current !== evidenceKey) {
         lastEvidenceKeyRef.current = evidenceKey;
         sessionEvidenceRef.current.push({ concept: c.check.concept, correct: r.event.correct, confidence: r.event.confidence, ts: Date.now() });
@@ -3990,6 +4000,56 @@ ${NATURAL_SPEECH_STYLE}`;
       return r.state;
     });
   };
+  // One short question about the weakest earlier idea, after a missed quiz question (see learning/diagnose.js).
+  // Any failure here (AI busy, no question written) just lets the lecture carry on.
+  diagnosticRef.current = async (index, concept, stale) => {
+    const pick = pickDiagnostic({ concept, slides: curriculum.slides, mastery: masteryNow(), diagnosed: diagnosedRef.current });
+    if (!pick) return;
+    diagnosedRef.current.add(concept);
+    let q = null;
+    try {
+      const qs = await generatePractice({ concept: pick.name, slides: curriculum.slides, callAI: (sys, pr, mt) => callAI(sys, pr, mt, undefined, "practice"), count: 2 });
+      q = qs && qs[0];
+    } catch (e) {
+      return;
+    }
+    if (!q || stale()) return;
+    const lead = diagnosticLead(pick.name);
+    setLecturerState2("explaining");
+    addMessage("lecturer", lead, "explain");
+    const leadDone = await speakInterruptible(lead);
+    if (stale()) return;
+    if (!leadDone) await waitForIdle();
+    setLecturerState2("idle");
+    const answered = new Promise((resolve) => {
+      checkResolverRef.current = resolve;
+      setActiveCheck({ ...newCheckState(index, q, performance.now()), diagnostic: { forConcept: concept, prerequisite: pick.name } });
+    });
+    const out = await answered;
+    if (stale() || !autopilotEnabledRef.current) return;
+    if (!out || out.skipped || out.cancelled) return;
+    const say = async (text) => {
+      setLecturerState2("explaining");
+      addMessage("lecturer", text, "explain");
+      const done = await speakInterruptible(text);
+      if (stale()) return;
+      if (!done) await waitForIdle();
+      setLecturerState2("idle");
+    };
+    await say(feedbackSpeech(q, out.correct));
+    if (stale()) return;
+    if (out.correct) {
+      await say(diagnosticNoGap(pick.name, concept));
+    } else {
+      setLecturerState2("loading");
+      const system = `You are ${lecturerIdentity}. ${NATURAL_SPEECH_STYLE}`;
+      const text = await askLecturer(system, diagnosticGapPrompt(pick.name, concept), diagnosticGapFallback(pick.name, concept), "diagnose");
+      if (stale()) return;
+      await say(text);
+    }
+    await sleep(500);
+  };
+
   const skipCheck = () => {
     setActiveCheck((c) => {
       const r = skipCheckState(c);
@@ -4336,7 +4396,10 @@ ${NATURAL_SPEECH_STYLE}`;
             )}
             </SlideBoundary>
             {activeCheck && activeCheck.index === slideIndex && (
-              <CheckCard state={activeCheck} onChoose={chooseCheckOption} onConfidence={finishCheck} onSkip={skipCheck} />
+              <>
+                {activeCheck.diagnostic && <div className="mastery-note" role="note" style={{ marginBottom: 6 }}>Quick check on an earlier idea: {activeCheck.diagnostic.prerequisite}</div>}
+                <CheckCard state={activeCheck} onChoose={chooseCheckOption} onConfidence={finishCheck} onSkip={skipCheck} />
+              </>
             )}
             {view === "slides" && userScrolled && autopilotOn && speakProgress.slide === slideIndex && lecturerState !== "idle" && (
               <button className="follow-pill" onClick={followLecturer}>↧ Follow the lecturer</button>
