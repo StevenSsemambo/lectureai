@@ -56,7 +56,13 @@ export function levelFor(mastery, n) {
 }
 
 // events: [{concept, correct:boolean, confidence?:"guess"|"unsure"|"sure", ts?:ms}]
-export function estimateMasteryBKT(events, now = Date.now(), params = BKT_DEFAULTS) {
+// What a student says about themselves ("I already know this", "I find this hard") is only a starting
+// belief, never evidence: quiz answers still decide. priors = { "concept name": "know" | "struggle" }.
+export const CLAIM_PRIORS = { know: 0.6, struggle: 0.1 };
+const norm = (c) => String(c || "").trim().toLowerCase();
+
+export function estimateMasteryBKT(events, now = Date.now(), params = BKT_DEFAULTS, priors = null) {
+  const claims = new Map(Object.entries(priors || {}).map(([k, v]) => [norm(k), v]));
   const by = new Map();
   for (const e of events || []) {
     if (!e || !e.concept || typeof e.correct !== "boolean") continue;
@@ -66,7 +72,8 @@ export function estimateMasteryBKT(events, now = Date.now(), params = BKT_DEFAUL
   const out = [];
   for (const [concept, list] of by) {
     list.sort((a, b) => (a.ts || 0) - (b.ts || 0));
-    let p = params.pInit;
+    const claim = claims.get(norm(concept));
+    let p = claim && CLAIM_PRIORS[claim] !== undefined ? CLAIM_PRIORS[claim] : params.pInit;
     let prevTs = null;
     let confidentWrong = 0, confident = 0;
     for (const e of list) {
@@ -96,7 +103,7 @@ export function estimateMasteryBKT(events, now = Date.now(), params = BKT_DEFAUL
       if (recent - earlier >= 0.4) trend = "improving";
       else if (recent - earlier <= -0.4) trend = "slipping";
     }
-    out.push({ concept, mastery: round2(p), low: round2(low), high: round2(high), n, level, trend, stale, confidentWrong, confident, lastAt: list[list.length - 1].ts || null });
+    out.push({ concept, claim: claim || null, mastery: round2(p), low: round2(low), high: round2(high), n, level, trend, stale, confidentWrong, confident, lastAt: list[list.length - 1].ts || null });
   }
   const order = { weak: 0, developing: 1, building: 2, strong: 3 };
   return out.sort((a, b) => order[a.level] - order[b.level] || a.mastery - b.mastery || a.concept.localeCompare(b.concept));
