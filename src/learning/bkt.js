@@ -19,7 +19,7 @@ export const BKT_DEFAULTS = {
   // [guess, slip] by how sure the student said they were
   noise: {
     guess: [0.5, 0.15],  // "just guessing": a right answer says little, a wrong one says little too
-    unsure: [0.3, 0.12],
+    fairly: [0.25, 0.1], // "fairly sure" (the app's middle option)
     default: [0.2, 0.1],
     sure: [0.12, 0.05],  // "very sure": a right answer is convincing, a wrong one is a real misconception
   },
