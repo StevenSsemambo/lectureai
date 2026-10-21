@@ -1,16 +1,24 @@
 import React from "react";
 import { nextReview } from "./mastery.js";
+import { isConfident } from "./bkt.js";
 
 const LEVEL_LABEL = { strong: "Strong", developing: "Getting there", weak: "Needs work", building: "Building" };
 const TREND_LABEL = { improving: "↗ improving", slipping: "↘ slipping", steady: "" };
 
 // The student's own view: what they have mastered, what to revise, and how well their confidence matches reality.
-export default function MasteryPanel({ mastery, revise, calibration, onPractice, now = Date.now() }) {
+export default function MasteryPanel({ mastery, revise, calibration, onPractice, notes, onNote, now = Date.now() }) {
   if (!mastery || !mastery.length) {
     return <p className="account-text">Answer the quick quiz questions in lectures (while signed in) and your strengths will appear here.</p>;
   }
+  const dueNow = mastery.filter((c) => c.lastAt && c.n >= 1 && nextReview(c, now).due).sort((a, b) => a.mastery - b.mastery);
   return (
     <div>
+      {onPractice && dueNow.length > 0 && (
+        <div className="account-actions" style={{ marginBottom: 10 }}>
+          <button className="nav-btn" onClick={() => onPractice(dueNow[0])}>Review what's due: {dueNow[0].concept}</button>
+          {dueNow.length > 1 ? <span className="mastery-note">{dueNow.length - 1} more due after that</span> : null}
+        </div>
+      )}
       {revise && revise.length > 0 && (
         <div className="sk-warnings" role="note" style={{ borderColor: "rgba(232,163,61,0.55)", background: "rgba(232,163,61,0.08)", color: "#F5D9A4" }}>
           <strong>Worth revising first</strong>
@@ -32,12 +40,20 @@ export default function MasteryPanel({ mastery, revise, calibration, onPractice,
             </div>
             <div className="mastery-note">
               {c.n} answer{c.n === 1 ? "" : "s"}{c.level === "building" ? " so far, keep going" : ""}
+              {c.level !== "building" && !isConfident(c) ? <span> · SEMAI isn't sure yet{c.low !== undefined ? ` (somewhere between ${Math.round(c.low * 100)}% and ${Math.round(c.high * 100)}%)` : ""}</span> : null}
               {c.lastAt ? (() => { const r = nextReview(c, now); return r.due ? <span className="mastery-due"> · due for revision now</span> : <span> · revise again in {r.inDays} day{r.inDays === 1 ? "" : "s"}</span>; })() : null}
               {onPractice && c.n >= 1 ? <button className="skip-link inline" style={{ marginLeft: 8 }} onClick={() => onPractice(c)}>Practise this</button> : null}
+              {onNote ? (
+                <span style={{ marginLeft: 8 }}>
+                  <button className="skip-link inline" aria-pressed={!!notes && notes[c.concept] === "know"} style={{ marginRight: 8, fontWeight: notes && notes[c.concept] === "know" ? 700 : 400 }} onClick={() => onNote(c.concept, notes && notes[c.concept] === "know" ? null : "know")}>I already know this</button>
+                  <button className="skip-link inline" aria-pressed={!!notes && notes[c.concept] === "struggle"} style={{ fontWeight: notes && notes[c.concept] === "struggle" ? 700 : 400 }} onClick={() => onNote(c.concept, notes && notes[c.concept] === "struggle" ? null : "struggle")}>I find this hard</button>
+                </span>
+              ) : null}
             </div>
           </li>
         ))}
       </ul>
+      {onNote && <p className="account-text">SEMAI's picture is an estimate from your quiz answers. If it's wrong, tell it: “I already know this” or “I find this hard” sets where it starts, and your answers still count.</p>}
       {calibration && calibration.level === "overconfident" && (
         <p className="account-text">You were “very sure” and wrong {Math.round(calibration.rate * 100)}% of the time. When you feel very sure, it's worth double-checking: those are the mistakes that stick.</p>
       )}
