@@ -46,11 +46,13 @@ export function planForSlide({ slide, slideIndex, mastery, session, enabled = tr
   // a prerequisite the student has found hard (and we haven't already reminded them of this session)
   let reminder = null;
   let lowest = Infinity;
+  let lowestN = 0; // equal estimates: more answers behind the weakness wins
   for (const name of slide.prerequisites || []) {
     const e = findLearnerConcept(mastery, name);
     if (!e || e.n < 2 || ![...ses.reminded].every((r) => !conceptsMatch(r, name))) continue;
-    if ((e.level === "weak" || (e.level === "developing" && e.trend === "slipping")) && e.mastery < lowest) {
+    if ((e.level === "weak" || (e.level === "developing" && e.trend === "slipping")) && (e.mastery < lowest || (e.mastery === lowest && e.n > lowestN))) {
       lowest = e.mastery;
+      lowestN = e.n;
       reminder = name;
     }
   }
