@@ -20,6 +20,7 @@ export const HELP_LABELS = {
   deeper: "Went deeper",
   why: "Explained why it matters",
   lost_help: "Re-explained after \"I'm lost\"",
+  diagnostic: "Checked an earlier topic first",
   none: "No extra help",
 };
 
@@ -70,6 +71,10 @@ export function recoveryCases(rows) {
         const p = r.payload || {};
         const concept = p.concept;
         if (!concept || typeof p.correct !== "boolean") continue;
+        if (p.diagnostic) { // a question about an EARLIER idea: counts as help for the miss it was asked about
+          for (const m of pending) if (at - m.at <= HELP_WINDOW_MS && p.for_concept && conceptsMatch(p.for_concept, m.concept)) m.methods.add("diagnostic");
+          continue;
+        }
         const still = [];
         for (const m of pending) {
           if (conceptsMatch(m.concept, concept)) cases.push({ concept: m.concept, recovered: p.correct, methods: [...m.methods] });
