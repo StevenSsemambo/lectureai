@@ -22,6 +22,8 @@ import { pickCorrections, correctionsPromptBlock } from "./learning/corrections.
 import { ConceptTable, MisconceptionList } from "./learning/ClassInsights.jsx";
 import MasteryPanel from "./learning/MasteryPanel.jsx";
 import RosterPanel from "./learning/RosterPanel.jsx";
+import VoicePanel from "./voice/VoicePanel.jsx";
+import { loadPrefs as loadVoicePrefs, savePrefs as saveVoicePrefs, chooseVoice, clampRate } from "./voice/voicePrefs.js";
 import { moduleToSetup, applyModuleSave, removeModule, duplicateModule, moveItem, blankSlide, courseDeleteConfirmed, nextActiveCourseId } from "./courseCrud.js";
 import { looksLikeEmail, accountLabel, recoveryCodeLooksValid, passwordError, recoveryCodeFile, friendlyAccountError } from "./accountHelpers.js";
 import { usernameError, normalizeUsername, fullNameError, cleanFullName, suggestUsername, friendlySignupError } from "./studentProfile.js";
@@ -3061,6 +3063,20 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
   }, [typedCode]);
   const [autopilotOn, setAutopilotOn] = useState(true);
   const [ttsNotice, setTtsNotice] = useState("");
+  // Student voice choices (speed, male/female, specific voice), remembered on this device.
+  const [voicePrefs, setVoicePrefs] = useState(loadVoicePrefs);
+  const voicePrefsRef = useRef(voicePrefs);
+  const [voices, setVoices] = useState([]);
+  const [voiceOpen, setVoiceOpen] = useState(false);
+  const voiceLang = (typeof navigator !== "undefined" && navigator.language) || "en";
+  useEffect(() => { voicePrefsRef.current = voicePrefs; saveVoicePrefs(voicePrefs); }, [voicePrefs]);
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.speechSynthesis) return undefined;
+    const load = () => setVoices(window.speechSynthesis.getVoices() || []);
+    load();
+    window.speechSynthesis.addEventListener && window.speechSynthesis.addEventListener("voiceschanged", load);
+    return () => { window.speechSynthesis.removeEventListener && window.speechSynthesis.removeEventListener("voiceschanged", load); };
+  }, []);
   const [aiNotice, setAiNotice] = useState("");
   const [audioBlocked, setAudioBlocked] = useState(false);
   const [sessionComplete, setSessionComplete] = useState(false);
@@ -3272,7 +3288,17 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
   // typing immediately, before we'd otherwise know real audio duration).
   const estimateSpeechDurationMs = (text) => {
     const words = text.trim().split(/\s+/).filter(Boolean).length;
-    return Math.max(1500, (words / AVG_SPEAKING_WPM) * 60000);
+    return Math.max(1500, (words / AVG_SPEAKING_WPM) * 60000 / (voicePrefsRef.current.rate || 1));
+  };
+
+  // A short sample in the student's chosen voice and speed. It never cancels the lecture's own speech.
+  const previewVoice = () => {
+    if (!window.speechSynthesis) return;
+    const u = new SpeechSynthesisUtterance("Hello, I'm your lecturer. This is how I sound at this speed.");
+    u.rate = voicePrefsRef.current.rate || 1;
+    const chosen = chooseVoice(window.speechSynthesis.getVoices(), voicePrefsRef.current, voiceLang);
+    if (chosen) { try { u.voice = chosen; u.lang = chosen.lang; } catch (e) { /* unusable voice: keep the default */ } }
+    window.speechSynthesis.speak(u);
   };
 
   const animateTyping = useCallback((code, durationMs, startFrom = 0) => {
@@ -3381,12 +3407,14 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
           const fetchMs = Math.round(performance.now() - tSpeak); // the whole sentence is downloaded before playback begins
           const url = URL.createObjectURL(blob);
           const audio = new Audio(url);
+          audio.playbackRate = voicePrefsRef.current.rate || 1;
+          try { audio.preservesPitch = true; } catch (e) { /* older browsers */ }
           audioRef.current = audio;
           setTtsNotice("");
           const result = await new Promise((resolve, reject) => {
             activeResolveRef.current = resolve;
             audio.onloadedmetadata = () => {
-              if (isFinite(audio.duration)) onDurationKnown && onDurationKnown(audio.duration * 1000);
+              if (isFinite(audio.duration)) onDurationKnown && onDurationKnown((audio.duration * 1000) / (voicePrefsRef.current.rate || 1));
             };
             audio.onplaying = () => markStart("elevenlabs", { fetch_ms: fetchMs });
             audio.onended = () => resolve(true);
@@ -3422,8 +3450,10 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
       return new Promise((resolve) => {
         activeResolveRef.current = resolve;
         const u = new SpeechSynthesisUtterance(text);
-        u.rate = 1;
+        u.rate = voicePrefsRef.current.rate || 1;
         u.pitch = 1;
+        const chosen = chooseVoice(window.speechSynthesis.getVoices(), voicePrefsRef.current, (typeof navigator !== "undefined" && navigator.language) || "en");
+        if (chosen) { try { u.voice = chosen; u.lang = chosen.lang; } catch (e) { /* unusable voice: keep the default */ } }
         u.onstart = () => markStart("browser");
         u.onend = () => resolve(true);
         utteranceRef.current = u;
@@ -4167,6 +4197,9 @@ ${NATURAL_SPEECH_STYLE}`;
           >
             <Volume2 size={13} /> {audioBlocked ? "Tap to enable sound" : "Replay voice"}
           </button>
+          <button className="topbar-edit" onClick={() => setVoiceOpen(true)} aria-haspopup="dialog" title="Change the lecturer's voice and speed">
+            🎙 Voice &amp; speed ({`${clampRate(voicePrefs.rate)}×`})
+          </button>
           <button className={`topbar-edit ${autopilotOn ? "on" : ""}`} onClick={toggleAutopilot} title="Toggle automatic lecture" aria-pressed={autopilotOn}>
             {autopilotOn ? <Volume2 size={13} /> : <VideoOff size={13} />} {autopilotOn ? "Auto-lecture on" : "Auto-lecture off"}
           </button>
@@ -4196,6 +4229,16 @@ ${NATURAL_SPEECH_STYLE}`;
         </div>
       </div>
       {moreOpen && <div className="topbar-scrim" onClick={() => setMoreOpen(false)} />}
+      <VoicePanel
+        open={voiceOpen}
+        onClose={() => setVoiceOpen(false)}
+        prefs={voicePrefs}
+        onChange={(p) => setVoicePrefs(p)}
+        voices={voices}
+        lang={voiceLang}
+        canPreview={paused || lecturerState === "idle"}
+        onPreview={previewVoice}
+      />
 
       {ttsNotice && (
         <div className={`tts-notice ${audioBlocked ? "clickable" : ""}`} onClick={audioBlocked ? enableAudio : undefined}>
@@ -5161,6 +5204,21 @@ function GlobalStyles() {
         .paused-note, .adapt-note { flex: 0 1 auto; }
       }
 
+      /* Student voice settings */
+      .voice-scrim { position: fixed; inset: 0; z-index: 80; background: rgba(0,0,0,0.45); }
+      .voice-panel { position: fixed; z-index: 81; top: 72px; right: 16px; width: min(360px, calc(100vw - 24px)); max-height: calc(100dvh - 96px); overflow-y: auto; background: #1A1F27; border: 1px solid #2A313C; border-radius: 14px; padding: 16px; box-shadow: 0 16px 48px rgba(0,0,0,0.5); color: #EDEFF2; }
+      .voice-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+      .voice-label { display: flex; justify-content: space-between; font-size: 12.5px; color: #8890A0; margin: 12px 0 6px; }
+      .voice-value { color: #EDEFF2; font-weight: 600; }
+      .voice-panel input[type="range"] { width: 100%; accent-color: #2F6F4F; }
+      .voice-presets { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
+      .voice-presets .pill:disabled { opacity: 0.4; cursor: not-allowed; }
+      .voice-select { width: 100%; min-height: 40px; background: #14181C; color: #EDEFF2; border: 1px solid #2A313C; border-radius: 8px; padding: 0 10px; font-size: 16px; }
+      .voice-note { font-size: 12px; line-height: 1.5; color: #8890A0; margin: 8px 0 0; }
+      .voice-actions { display: flex; gap: 8px; margin-top: 14px; }
+      @media (max-width: 720px) {
+        .voice-panel { top: auto; right: 0; left: 0; bottom: 0; width: auto; max-height: 82dvh; border-radius: 16px 16px 0 0; padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
+      }
       /* Accessibility: a strong, consistent keyboard focus ring, applied
          globally and placed last in the cascade so it overrides any
          earlier outline:none on individual form elements (several had
