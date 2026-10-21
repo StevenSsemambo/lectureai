@@ -63,8 +63,9 @@ export function calibration(events) {
 }
 
 // Concepts worth revisiting, most urgent first.
+// (two clean right answers is not worth a revision session, hence the 0.75 cut-off for "developing")
 export function conceptsToRevise(list, k = 3) {
-  return (list || []).filter((c) => (c.level === "weak" || c.level === "developing" || c.trend === "slipping") && c.n >= 2).slice(0, k);
+  return (list || []).filter((c) => (c.level === "weak" || (c.level === "developing" && c.mastery < 0.75) || c.trend === "slipping") && c.n >= 2).slice(0, k);
 }
 
 // Spaced revision: when should this concept come up again? Weak ideas return sooner than strong ones.
