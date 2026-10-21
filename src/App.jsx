@@ -22,8 +22,10 @@ import { pickCorrections, correctionsPromptBlock } from "./learning/corrections.
 import { ConceptTable, MisconceptionList } from "./learning/ClassInsights.jsx";
 import MasteryPanel from "./learning/MasteryPanel.jsx";
 import RosterPanel from "./learning/RosterPanel.jsx";
+import TeachingEffectPanel from "./learning/TeachingEffectPanel.jsx";
 import VoicePanel from "./voice/VoicePanel.jsx";
 import { loadPrefs as loadVoicePrefs, savePrefs as saveVoicePrefs, chooseVoice, clampRate } from "./voice/voicePrefs.js";
+import { createSessionManager, SessionExpiredError } from "./authSession.js";
 import { moduleToSetup, applyModuleSave, removeModule, duplicateModule, moveItem, blankSlide, courseDeleteConfirmed, nextActiveCourseId } from "./courseCrud.js";
 import { looksLikeEmail, accountLabel, recoveryCodeLooksValid, passwordError, recoveryCodeFile, friendlyAccountError } from "./accountHelpers.js";
 import { usernameError, normalizeUsername, fullNameError, cleanFullName, suggestUsername, friendlySignupError } from "./studentProfile.js";
@@ -636,6 +638,15 @@ async function recordSession(session, accessToken) {
   } catch (e) {
     console.error("Failed to record session:", e);
   }
+}
+
+// Quiz answers and the help given around them, for the "what helped students recover" panel.
+async function fetchCourseLearningEvents(courseId, accessToken) {
+  return supabaseRequest(
+    `/learning_events?course_id=eq.${encodeURIComponent(courseId)}&event_type=in.(check_answer,adapt_applied,adapt_request,signal)&select=session_id,student_id,student_key,event_type,slide_index,created_at,payload&order=created_at.asc&limit=1000`,
+    {},
+    accessToken
+  );
 }
 
 async function fetchSessions(courseId, accessToken) {
@@ -2823,7 +2834,8 @@ function SlideAnalyticsPanel({ course, session }) {
   );
 }
 
-function CourseInsightsScreen({ course, session, onBack }) {
+function CourseInsightsScreen({ course, session, runAuthed, onBack }) {
+  const authed = useCallback((fn) => (runAuthed ? runAuthed(fn) : fn(session?.accessToken)), [runAuthed, session]);
   const [sessions, setSessions] = useState(null); // null = loading
   const [flags, setFlags] = useState(null);
   const [error, setError] = useState("");
@@ -2833,7 +2845,7 @@ function CourseInsightsScreen({ course, session, onBack }) {
     setSessions(null);
     setFlags(null);
     setError("");
-    Promise.all([fetchSessions(course.id, session?.accessToken), fetchFlaggedQuestions(course.id, session?.accessToken)])
+    authed((t) => Promise.all([fetchSessions(course.id, t), fetchFlaggedQuestions(course.id, t)]))
       .then(([s, f]) => {
         setSessions(s);
         setFlags(f);
@@ -2843,26 +2855,28 @@ function CourseInsightsScreen({ course, session, onBack }) {
         setSessions([]);
         setFlags([]);
       });
-  }, [course.id, session]);
+  }, [course.id, authed]);
 
   useEffect(() => {
     load();
   }, [load]);
 
   const loadStudentRows = useCallback(
-    (moduleId) => supabaseRequest("/rpc/module_student_roster", { method: "POST", body: JSON.stringify({ p_module_id: moduleId }) }, session && session.accessToken),
-    [session]
+    (moduleId) => authed((t) => supabaseRequest("/rpc/module_student_roster", { method: "POST", body: JSON.stringify({ p_module_id: moduleId }) }, t)),
+    [authed]
   );
 
+  const loadTeachingEvents = useCallback(() => authed((t) => fetchCourseLearningEvents(course.id, t)), [authed, course.id]);
+
   const approveFlag = async (flagId, question, answer) => {
-    await approveFlaggedQuestion(flagId, question, answer, session?.accessToken);
+    await authed((t) => approveFlaggedQuestion(flagId, question, answer, t));
     setFlags((fs) => fs.map((f) => (f.id === flagId ? { ...f, resolved: true, approved_question: question, lecturer_answer: answer } : f)));
   };
 
   const markResolved = async (flagId) => {
     setFlags((fs) => fs.map((f) => (f.id === flagId ? { ...f, resolved: true } : f)));
     try {
-      await resolveFlaggedQuestion(flagId, session?.accessToken);
+      await authed((t) => resolveFlaggedQuestion(flagId, t));
     } catch (e) {
       load(); // out of sync with the server — just reload rather than show a wrong state
     }
@@ -2902,6 +2916,7 @@ function CourseInsightsScreen({ course, session, onBack }) {
 
           <SlideAnalyticsPanel course={course} session={session} />
           <RosterPanel course={course} loadRows={loadStudentRows} />
+          <TeachingEffectPanel loadRows={loadTeachingEvents} />
 
           <div className="flag-section">
             <div className="flag-section-title">Sessions</div>
@@ -4487,6 +4502,19 @@ export default function SEMAIApp() {
   const [studentProfile, setStudentProfile] = useState(undefined);
   const [dbStatus, setDbStatus] = useState(supabaseEnabled() ? "loading" : "local"); // loading | connected | error | local
   const [session, setSession] = useState(null); // { accessToken, refreshToken, user: {id, email} } | null
+  // Keeps the lecturer's token fresh for every cloud write (see authSession.js). The manager is created
+  // once; it always reads the latest session through sessionMgr.set() below.
+  const sessionMgr = useMemo(() => createSessionManager({
+    refresh: refreshUserSession,
+    onChange: (s) => {
+      setSession(s);
+      saveSessionLocally(s);
+      if (!s) { setNotice({ kind: "error", text: "Your sign-in expired, so changes can't be saved. Please sign in again." }); setStage("auth"); }
+    },
+  }), []);
+  const runAuthed = useCallback((fn) => sessionMgr.run(fn), [sessionMgr]);
+  const cloudCoursesRef = useRef(new Set()); // course ids known to exist in the cloud
+  const cloudQueueRef = useRef(Promise.resolve()); // cloud writes run one after another, in order
   const [studentSession, setStudentSession] = useState(null); // same shape, separate identity/storage — a student account isn't a lecturer account
   const [legalReturnStage, setLegalReturnStage] = useState("splash");
 
@@ -4540,6 +4568,7 @@ export default function SEMAIApp() {
     fetchCoursesFromSupabase()
       .then((loaded) => {
         if (cancelled) return;
+        loaded.forEach((c) => cloudCoursesRef.current.add(c.id));
         setCourses(loaded.length > 0 ? loaded : [DEFAULT_COURSE]);
         setDbStatus("connected");
       })
@@ -4570,6 +4599,7 @@ export default function SEMAIApp() {
   // Only Supabase-backed courses have a real owner_id to filter on. Without
   // Supabase configured, everything stays in the old single-user local mode
   // (no auth gate at all — see the role-select handler below).
+  sessionMgr.set(session);
   const myCourses = supabaseEnabled() && session ? courses.filter((c) => c.ownerId === session.user.id) : courses;
 
   const handleAuthenticated = (newSession) => {
@@ -4623,6 +4653,11 @@ export default function SEMAIApp() {
   };
 
   const handleNewCourse = () => {
+    if (supabaseEnabled() && !session) {
+      setNotice({ kind: "error", text: "Please sign in as a lecturer before creating a course." });
+      setStage("auth");
+      return;
+    }
     setCourseDraft({
       id: makeId("course"), code: "", title: "", institution: "",
       tone: "conversational", voiceProvider: "browser", elevenLabsApiKey: "", elevenLabsVoiceId: "",
@@ -4643,7 +4678,11 @@ export default function SEMAIApp() {
     setCourses((cs) => (cs.some((c) => c.id === courseDraft.id) ? cs.map((c) => (c.id === courseDraft.id ? courseDraft : c)) : [...cs, courseDraft]));
     setActiveCourseId(courseDraft.id);
     if (supabaseEnabled()) {
-      saveCourseToSupabase(courseDraft, session?.accessToken).catch(reportSaveError("the course"));
+      const draft = courseDraft;
+      enqueueCloud(() => sessionMgr.run(async (token) => {
+        await saveCourseToSupabase({ ...draft, ownerId: draft.ownerId || sessionMgr.get().user.id }, token);
+        cloudCoursesRef.current.add(draft.id);
+      })).catch(reportSaveError("the course"));
     }
     if (editingCourse) {
       setStage("dashboard");
@@ -4664,14 +4703,36 @@ export default function SEMAIApp() {
   // "Save & preview as student" path does that.
   const reportSaveError = (what) => (e) => {
     console.error(`Supabase ${what} save failed:`, e);
-    setNotice({ kind: "error", text: `Couldn't save ${what} to the cloud, so it may be lost on refresh. ${String((e && e.message) || "").slice(0, 140)}` });
+    if (e instanceof SessionExpiredError) return; // the sign-in notice is already showing
+    const raw = String((e && e.message) || "");
+    let why = raw.slice(0, 140);
+    if (/42501/.test(raw)) why = "Your account isn't allowed to change this course. Sign out and back in, and make sure it's a course you created.";
+    else if (/23503/.test(raw)) why = "The course hasn't reached the cloud yet. Try saving again.";
+    setNotice({ kind: "error", text: `Couldn't save ${what} to the cloud, so it may be lost on refresh. ${why}` });
   };
+
+  // Cloud writes go through one queue so a module can never be sent before its course.
+  const enqueueCloud = (task) => {
+    const run = cloudQueueRef.current.then(task, task);
+    cloudQueueRef.current = run.catch(() => {});
+    return run;
+  };
+  // Make sure the course exists in the cloud, then save the module.
+  const cloudSaveModule = (course, moduleObj) =>
+    enqueueCloud(() => sessionMgr.run(async (token) => {
+      if (!cloudCoursesRef.current.has(course.id)) {
+        await saveCourseToSupabase({ ...course, ownerId: course.ownerId || sessionMgr.get().user.id }, token);
+        cloudCoursesRef.current.add(course.id);
+      }
+      await saveModuleToSupabase(course.id, moduleObj, token);
+    }));
 
   const handleSaveModule = (moduleObj) => {
     const wasEdit = (courses.find((c) => c.id === activeCourseId)?.modules || []).some((m) => m.id === moduleObj.id);
     setCourses((cs) => cs.map((c) => (c.id === activeCourseId ? applyModuleSave(c, moduleObj) : c)));
     if (supabaseEnabled()) {
-      saveModuleToSupabase(activeCourseId, moduleObj, session?.accessToken).catch(reportSaveError("the module"));
+      const course = courses.find((c) => c.id === activeCourseId);
+      if (course) cloudSaveModule(course, moduleObj).catch(reportSaveError("the module"));
     }
     setNotice(wasEdit ? { kind: "ok", text: `Saved changes to “${moduleObj.unit}”.` } : null);
     setStage("dashboard");
@@ -4681,9 +4742,7 @@ export default function SEMAIApp() {
     const course = courses.find((c) => c.id === activeCourseId);
     const updatedCourse = applyModuleSave(course, moduleObj);
     setCourses((cs) => cs.map((c) => (c.id === activeCourseId ? updatedCourse : c)));
-    if (supabaseEnabled()) {
-      saveModuleToSupabase(activeCourseId, moduleObj, session?.accessToken).catch(reportSaveError("the module"));
-    }
+    if (supabaseEnabled()) cloudSaveModule(course, moduleObj).catch(reportSaveError("the module"));
     primeAudioForVoice();
     setRoomData(buildRoomData(updatedCourse, moduleObj));
     setStudentName("Lecturer (preview)");
@@ -4700,13 +4759,13 @@ export default function SEMAIApp() {
   const handleDuplicateModule = (course, module) => {
     const copy = duplicateModule(module, makeId("module"));
     setCourses((cs) => cs.map((c) => (c.id === course.id ? applyModuleSave(c, copy) : c)));
-    if (supabaseEnabled()) saveModuleToSupabase(course.id, copy, session?.accessToken).catch(reportSaveError("the copy"));
+    if (supabaseEnabled()) cloudSaveModule(course, copy).catch(reportSaveError("the copy"));
     setNotice({ kind: "ok", text: `Created “${copy.unit}”. Open Edit to rename it.` });
   };
 
   const handleDeleteModule = async (course, module) => {
     try {
-      if (supabaseEnabled()) await deleteModuleFromSupabase(module.id, session?.accessToken);
+      if (supabaseEnabled()) await enqueueCloud(() => sessionMgr.run((token) => deleteModuleFromSupabase(module.id, token)));
       setCourses((cs) => cs.map((c) => (c.id === course.id ? removeModule(c, module.id) : c)));
       setNotice({ kind: "ok", text: `Deleted “${module.unit}”.` });
     } catch (e) {
@@ -4716,7 +4775,10 @@ export default function SEMAIApp() {
 
   const handleDeleteCourse = async (course) => {
     try {
-      if (supabaseEnabled()) await deleteCourseFromSupabase(course.id, session?.accessToken);
+      if (supabaseEnabled()) {
+        await enqueueCloud(() => sessionMgr.run((token) => deleteCourseFromSupabase(course.id, token)));
+        cloudCoursesRef.current.delete(course.id);
+      }
       setCourses((cs) => cs.filter((c) => c.id !== course.id));
       setActiveCourseId((cur) => nextActiveCourseId(courses, course.id, cur));
       setInsightsCourse((cur) => (cur && cur.id === course.id ? null : cur));
@@ -4797,7 +4859,7 @@ export default function SEMAIApp() {
         />
       )}
       {stage === "flags" && insightsCourse && (
-        <CourseInsightsScreen course={insightsCourse} session={session} onBack={() => setStage("dashboard")} />
+        <CourseInsightsScreen course={insightsCourse} session={session} runAuthed={runAuthed} onBack={() => setStage("dashboard")} />
       )}
       {stage === "courseMeta" && courseDraft && (
         <CourseMetaScreen
