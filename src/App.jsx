@@ -16,7 +16,7 @@ import { logClientError } from "./errorLogging.jsx";
 import { startTracking, track, flushEvents, stopTracking, getStudentKey, slideKeyFor, postStandaloneEvents } from "./analytics.js";
 import { attentionScore, heatLevel, whyFlagged, formatDwell } from "./slideKit/insights.js";
 import CheckCard from "./slideKit/CheckCard.jsx";
-import { estimateMastery, calibration as studentCalibration, conceptsToRevise } from "./learning/mastery.js";
+import { estimateMastery, estimateWithClaims, calibration as studentCalibration, conceptsToRevise } from "./learning/mastery.js";
 import { summarizeBreakdown, commonMisconceptions, weakConcepts } from "./learning/misconceptions.js";
 import { pickCorrections, correctionsPromptBlock } from "./learning/corrections.js";
 import { ConceptTable, MisconceptionList } from "./learning/ClassInsights.jsx";
@@ -586,6 +586,25 @@ async function fetchMyCheckEvents(studentId, accessToken) {
 }
 
 // A student's finished-session totals (their own only), for the focus-rhythm note.
+// What the student told SEMAI about themselves: { "concept": "know" | "struggle" }. Private to the student.
+async function fetchConceptNotes(studentId, accessToken) {
+  const rows = await supabaseRequest(`/student_concept_notes?student_id=eq.${encodeURIComponent(studentId)}&select=concept,claim&limit=500`, {}, accessToken);
+  const out = {};
+  for (const r of Array.isArray(rows) ? rows : []) if (r && r.concept && (r.claim === "know" || r.claim === "struggle")) out[r.concept] = r.claim;
+  return out;
+}
+async function saveConceptNote(studentId, concept, claim, accessToken) {
+  if (!claim) {
+    await supabaseRequest(`/student_concept_notes?student_id=eq.${encodeURIComponent(studentId)}&concept=eq.${encodeURIComponent(concept)}`, { method: "DELETE", headers: { Prefer: "return=minimal" } }, accessToken);
+    return;
+  }
+  await supabaseRequest(
+    "/student_concept_notes",
+    { method: "POST", headers: { Prefer: "resolution=merge-duplicates,return=minimal" }, body: JSON.stringify([{ student_id: studentId, concept: String(concept).slice(0, 80), claim, updated_at: new Date().toISOString() }]) },
+    accessToken
+  );
+}
+
 async function fetchMySessionTotals(studentId, accessToken) {
   const rows = await supabaseRequest(
     `/learning_events?student_id=eq.${encodeURIComponent(studentId)}&event_type=eq.session_end&select=payload&order=created_at.desc&limit=20`,
@@ -2439,6 +2458,21 @@ function MyHistoryScreen({ session, courses, onBack, onAccountDeleted, onOpenLeg
   const [error, setError] = useState("");
   const [expandedId, setExpandedId] = useState(null);
   const [learning, setLearning] = useState(null); // { mastery, revise, calibration, events }
+  const [notes, setNotes] = useState({}); // what this student said about their own knowledge
+  const [notesError, setNotesError] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    fetchConceptNotes(session.user.id, session.accessToken).then((n) => { if (!cancelled) setNotes(n); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [session]);
+  const setNote = async (concept, claim) => {
+    const prev = notes;
+    const next = { ...notes };
+    if (claim) next[concept] = claim; else delete next[concept];
+    setNotes(next); setNotesError("");
+    try { await saveConceptNote(session.user.id, concept, claim, session.accessToken); }
+    catch (e) { setNotes(prev); setNotesError("Couldn't save that just now. Please try again."); }
+  };
   const [rhythm, setRhythm] = useState(null);
   useEffect(() => {
     let cancelled = false;
@@ -2447,13 +2481,15 @@ function MyHistoryScreen({ session, courses, onBack, onAccountDeleted, onOpenLeg
   }, [session]);
   const [practice, setPractice] = useState(null); // { concept, loading | questions | error, courseId, moduleId, sessionId }
   const [reloadTick, setReloadTick] = useState(0);
+  const notesRef = useRef({});
+  notesRef.current = notes;
 
   useEffect(() => {
     let cancelled = false;
     fetchMyCheckEvents(session.user.id, session.accessToken)
       .then((events) => {
         if (cancelled) return;
-        const mastery = estimateMastery(events);
+        const mastery = estimateWithClaims(events, notesRef.current);
         setLearning({ mastery, revise: conceptsToRevise(mastery, 3), calibration: studentCalibration(events), events });
       })
       .catch(() => { if (!cancelled) setLearning({ mastery: [], revise: [], calibration: { level: "unknown" }, events: [] }); });
@@ -2461,6 +2497,8 @@ function MyHistoryScreen({ session, courses, onBack, onAccountDeleted, onOpenLeg
   }, [session, reloadTick]);
 
   // Revision practice: AI-written questions grounded in the lecture that taught the concept
+  // re-estimate whenever the student changes what they say about themselves
+  const liveMastery = useMemo(() => (learning ? estimateWithClaims(learning.events, notes) : []), [learning, notes]);
   const startPractice = async (c) => {
     const last = [...((learning && learning.events) || [])].reverse().find((e) => e.concept === c.concept);
     const course = (courses || []).find((co) => last && co.id === last.courseId);
@@ -2518,7 +2556,10 @@ function MyHistoryScreen({ session, courses, onBack, onAccountDeleted, onOpenLeg
         ) : learning === null ? (
           <div className="empty-hint"><Loader2 className="spin" size={14} /> Loading…</div>
         ) : (
-          <MasteryPanel mastery={learning.mastery} revise={learning.revise} calibration={learning.calibration} onPractice={startPractice} />
+          <>
+            <MasteryPanel mastery={liveMastery} revise={conceptsToRevise(liveMastery, 3)} calibration={learning.calibration} notes={notes} onNote={setNote} onPractice={startPractice} />
+            {notesError && <div className="setup-error" role="alert"><AlertTriangle size={13} /> {notesError}</div>}
+          </>
         )}
         {rhythm && <p className="account-text" style={{ marginTop: 10 }}><strong>Your focus rhythm.</strong> {rhythm} Only you can see this.</p>}
       </section>
@@ -3069,7 +3110,8 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
   const lastEvidenceKeyRef = useRef("");
   const diagnosedRef = useRef(new Set()); // concepts already investigated this lecture
   const diagnosticRef = useRef(null); // always the latest runDiagnostic (assigned below)
-  const masteryNow = () => estimateMastery([...historyRef.current, ...sessionEvidenceRef.current]);
+  const claimsRef = useRef({}); // what the student said about themselves (signed-in students only)
+  const masteryNow = () => estimateWithClaims([...historyRef.current, ...sessionEvidenceRef.current], claimsRef.current);
   // The slide area scrolls to follow the lecturer; scrolling by hand pauses that.
   const stageRef = useRef(null);
   const [speakProgress, setSpeakProgress] = useState({ slide: -1, i: 0, n: 1, text: "" });
@@ -3148,6 +3190,7 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
     historyPromiseRef.current = fetchMyCheckEvents(studentSession.user.id, studentSession.accessToken)
       .then((ev) => { historyRef.current = ev; })
       .catch(() => {});
+    fetchConceptNotes(studentSession.user.id, studentSession.accessToken).then((n) => { claimsRef.current = n; }).catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const correctionsRef = useRef([]); // lecturer-approved answers for this module
