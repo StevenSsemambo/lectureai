@@ -39,7 +39,10 @@ import { generatePractice } from "./learning/practice.js";
 import { pickDiagnostic, diagnosticLead, diagnosticNoGap, diagnosticGapPrompt, diagnosticGapFallback } from "./learning/diagnose.js";
 import { welcomeBackLine, createPauseTracker, breakNudgeDue, BREAK_NUDGE_TEXT, pauseHotspot, engagementSummary, focusRhythmText } from "./learning/pauses.js";
 import FlagReviewCard from "./learning/FlagReviewCard.jsx";
-import { newCheckState, chooseOption as chooseCheckState, finishCheck as finishCheckState, skipCheck as skipCheckState, feedbackSpeech } from "./slideKit/checkFlow.js";
+import { PERSONAS, PERSONA_IDS, MAX_NAME, MAX_NOTE, DEFAULT_PERSONA, resolvePersona, lecturerIdentityFor, introPreview, introGuidance, sanitizeName, sanitizeStyleNote } from "./persona/persona.js";
+import { quizFeedback, questionAck } from "./persona/feedback.js";
+import { buildWelcomeFacts, welcomeGuidance } from "./persona/welcome.js";
+import { newCheckState, chooseOption as chooseCheckState, finishCheck as finishCheckState, skipCheck as skipCheckState } from "./slideKit/checkFlow.js";
 import {
   Pause, Play, Hand, MessageSquare, PhoneOff, Code2, PresentationIcon, Send,
   ChevronRight, ChevronLeft, Video, VideoOff, Loader2, Volume2, Upload,
@@ -166,6 +169,9 @@ function buildRoomData(course, module) {
       voiceProvider: course.voiceProvider,
       elevenLabsApiKey: course.elevenLabsApiKey,
       elevenLabsVoiceId: course.elevenLabsVoiceId,
+      lecturerName: course.lecturerName || "",
+      lecturerPersona: course.lecturerPersona || "",
+      lecturerStyleNote: course.lecturerStyleNote || "",
     },
   };
 }
@@ -445,6 +451,9 @@ async function fetchCoursesFromSupabase() {
     elevenLabsApiKey: "", // deliberately never fetched — see security note above
     elevenLabsVoiceId: c.elevenlabs_voice_id || "",
     ownerId: c.owner_id || null,
+    lecturerName: c.lecturer_name || "",
+    lecturerPersona: c.lecturer_persona || "",
+    lecturerStyleNote: c.lecturer_style_note || "",
     modules: moduleRows
       .filter((m) => m.course_id === c.id)
       .map((m) => ({
@@ -475,6 +484,9 @@ async function saveCourseToSupabase(course, accessToken) {
           voice_provider: course.voiceProvider,
           elevenlabs_voice_id: course.elevenLabsVoiceId || null,
           owner_id: course.ownerId,
+          lecturer_name: sanitizeName(course.lecturerName) || null,
+          lecturer_persona: course.lecturerPersona || null,
+          lecturer_style_note: sanitizeStyleNote(course.lecturerStyleNote) || null,
         },
       ]),
     },
@@ -1660,6 +1672,26 @@ function CourseMetaScreen({ draft, editing, onChange, onContinue, onCancel }) {
             </button>
           ))}
         </div>
+
+        <div className="setup-label" style={{ marginTop: 18 }} id="lecturer-label">Your AI lecturer</div>
+        <div className="setup-optional" style={{ marginTop: -2, marginBottom: 6 }}>
+          Give the lecturer a name and a personality so students meet the same character every time. Students are always told it is an AI lecturer. Everything here is optional.
+        </div>
+        <input className="setup-input" placeholder="Name, e.g. Dr. Amani (optional)" aria-label="AI lecturer name" maxLength={MAX_NAME} value={draft.lecturerName || ""} onChange={(e) => onChange({ lecturerName: e.target.value })} />
+        <div className="pill-row" role="group" aria-labelledby="lecturer-label">
+          {PERSONA_IDS.map((id) => {
+            const on = (draft.lecturerPersona || DEFAULT_PERSONA) === id;
+            return (
+              <button key={id} className={`pill ${on ? "active" : ""}`} onClick={() => onChange({ lecturerPersona: id })} title={PERSONAS[id].blurb} aria-pressed={on}>
+                {PERSONAS[id].label}
+              </button>
+            );
+          })}
+        </div>
+        <div className="setup-optional" style={{ marginTop: 6 }}>{PERSONAS[draft.lecturerPersona || DEFAULT_PERSONA].blurb}</div>
+        <textarea className="setup-input" rows={3} maxLength={MAX_NOTE} placeholder="Anything else about how it should speak (optional), e.g. use football examples, keep it short" aria-label="Lecturer style note" value={draft.lecturerStyleNote || ""} onChange={(e) => onChange({ lecturerStyleNote: e.target.value })} />
+        <div className="setup-optional" style={{ marginTop: -2 }}>{(draft.lecturerStyleNote || "").length}/{MAX_NOTE} · this changes how it speaks, not what it teaches.</div>
+        <div className="setup-optional" style={{ marginTop: 6, fontStyle: "italic" }}>Sample greeting: “{introPreview(draft.lecturerPersona || DEFAULT_PERSONA, sanitizeName(draft.lecturerName))}”</div>
 
         <div className="setup-label" style={{ marginTop: 18 }} id="voice-label">Lecturer voice</div>
         <div className="pill-row" role="group" aria-labelledby="voice-label">
@@ -3355,7 +3387,30 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
   const followLecturer = () => setUserScrolled(false); // the effect above scrolls straight back to what's being discussed
   const wordBudget = computeWordBudget(settings.durationMinutes, curriculum.slides.length, settings.pace);
   const toneDesc = (TONE_OPTIONS.find((t) => t.id === settings.tone) || TONE_OPTIONS[0]).desc;
-  const lecturerIdentity = `a ${toneDesc} university lecturer teaching ${curriculum.code} — ${curriculum.title}${settings.institution ? ` at ${settings.institution}` : ""}`;
+  const personaCourse = { code: curriculum.code, title: curriculum.title, lecturerName: settings.lecturerName, lecturerPersona: settings.lecturerPersona, lecturerStyleNote: settings.lecturerStyleNote };
+  const personaId = resolvePersona(personaCourse).id;
+  const lecturerIdentity = lecturerIdentityFor(personaCourse, { toneDesc, institution: settings.institution }).replace(/\.\s*$/, "");
+  const lastFeedbackKeyRef = useRef(null);
+  const lastAckKeyRef = useRef(null);
+  // Feedback that answers what the student actually did: recovering after a miss, a run of right answers,
+  // how sure they said they were. Counts only what has really been recorded.
+  const feedbackFor = (check, outcome) => {
+    const same = (list) => list.filter((e) => e.concept && check.concept && conceptsMatch(e.concept, check.concept));
+    const sess = same(sessionEvidenceRef.current);
+    const priorSess = sess.slice(0, -1); // the answer just given is already recorded
+    const priorHist = same(historyRef.current);
+    let streak = 0;
+    for (let i = sessionEvidenceRef.current.length - 1; i >= 0; i--) { if (sessionEvidenceRef.current[i].correct) streak++; else break; }
+    const r = quizFeedback({
+      check, correct: outcome.correct, confidence: outcome.confidence || null,
+      priorMisses: priorSess.filter((e) => !e.correct).length,
+      everWeak: priorHist.filter((e) => !e.correct).length >= 2,
+      streak: outcome.correct ? streak : 0,
+      name: studentName, personaId, last: lastFeedbackKeyRef.current,
+    });
+    lastFeedbackKeyRef.current = r.key;
+    return r.text;
+  };
 
   // Code reveals fresh on a new slide: full code if it's already been taught,
   // blank (waiting to be live-typed) if this is the first visit.
@@ -3756,7 +3811,7 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
         if (stale() || !autopilotEnabledRef.current) return;
         ranCheck = true;
         if (outcome && !outcome.skipped && !outcome.cancelled) {
-          const feedback = feedbackSpeech(check, outcome.correct);
+          const feedback = feedbackFor(check, outcome);
           setLecturerState2("explaining");
           addMessage("lecturer", feedback, "explain");
           const fbDone = await speakInterruptible(feedback);
@@ -3799,19 +3854,24 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
 
   const runIntro = useCallback(async () => {
     setLecturerState2("loading");
-    const system = `You are ${lecturerIdentity}. A student named ${studentName} just joined your live virtual classroom. Warmly welcome them by name, briefly introduce yourself as their AI lecturer, and give a short overview of what today's session (${curriculum.unit}) will cover. Under ${Math.max(
+    const system = `You are ${lecturerIdentity}. A student named ${studentName} just joined your live virtual classroom. Warmly welcome them by name. ${introGuidance(personaCourse)} Then give a short overview of what today's session (${curriculum.unit}) will cover. Under ${Math.max(
       50,
       Math.round(wordBudget * 0.7)
     )} words. ${NATURAL_SPEECH_STYLE}`;
     await Promise.race([historyPromiseRef.current || Promise.resolve(), sleep(1500)]);
-    let personal = "";
+    let personal = welcomeGuidance({ mode: "unknown", facts: [] });
     if (adaptOnRef.current) {
       const moduleConcepts = [...new Set(curriculum.slides.flatMap((s) => [...(s.concepts || []), ...(s.prerequisites || [])]))];
+      // only things really on record: earlier answers from this student's own saved history
+      const wf = buildWelcomeFacts({ events: historyRef.current, moduleConcepts });
+      personal = welcomeGuidance(wf);
       const rel = conceptsToRevise(masteryNow(), 3).filter((c) => moduleConcepts.some((m) => conceptsMatch(m, c.concept))).map((c) => c.concept);
-      if (rel.length) personal = ` Also tell the student, in one friendly sentence, that you will give a quick reminder where ${rel.join(" and ")} come up, since those were tricky before. Do not mention scores or percentages.`;
+      if (rel.length && wf.mode === "returning") personal += ` Also say, in one friendly sentence, that you will give a quick reminder where ${rel.join(" and ")} come up. Do not mention scores or percentages.`;
     }
     const prompt = `Course: ${curriculum.code} — ${curriculum.title}. Today's topics in order: ${curriculum.slides.map((s) => s.title).join(", ")}.${personal}`;
-    const text = await askLecturer(system, prompt, `Welcome, ${studentName}! Today we're covering ${curriculum.unit}.`, "welcome");
+    const resolved = resolvePersona(personaCourse);
+    const fallbackWelcome = `Welcome, ${studentName}! ${resolved.name ? `I'm ${resolved.name}, your AI lecturer. ` : "I'm your AI lecturer. "}Today we're covering ${curriculum.unit}.`;
+    const text = await askLecturer(system, prompt, fallbackWelcome, "welcome");
     if (!mountedRef.current) return;
     const safeText = text;
     addMessage("lecturer", safeText, "explain");
@@ -3926,13 +3986,9 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
       // generating the real answer happen concurrently so the answer is
       // ready (or close to it) by the time the acknowledgment finishes,
       // rather than adding its speaking time as pure extra latency.
-      const acknowledgments = [
-        `Yes, ${studentName}?`,
-        `Sure, ${studentName} — go ahead.`,
-        `Go ahead, ${studentName}.`,
-        `Yes ${studentName}, what's your question?`,
-      ];
-      const ack = acknowledgments[Math.floor(Math.random() * acknowledgments.length)];
+      const ackPick = questionAck({ name: studentName, personaId, last: lastAckKeyRef.current });
+      lastAckKeyRef.current = ackPick.key;
+      const ack = ackPick.text;
       addMessage("lecturer", ack, "explain");
       const ackPromise = speakInterruptible(ack, { onStart: () => logTiming("qa_ack_start", { client_ms: performance.now() - tQuestion }) });
 
@@ -4137,7 +4193,7 @@ ${NATURAL_SPEECH_STYLE}`;
       if (!done) await waitForIdle();
       setLecturerState2("idle");
     };
-    await say(feedbackSpeech(q, out.correct));
+    await say(feedbackFor(q, out));
     if (stale()) return;
     if (out.correct) {
       await say(diagnosticNoGap(pick.name, concept));
@@ -4877,6 +4933,7 @@ export default function SEMAIApp() {
     setCourseDraft({
       id: makeId("course"), code: "", title: "", institution: "",
       tone: "conversational", voiceProvider: "browser", elevenLabsApiKey: "", elevenLabsVoiceId: "",
+      lecturerName: "", lecturerPersona: DEFAULT_PERSONA, lecturerStyleNote: "",
       ownerId: session ? session.user.id : null,
       modules: [],
     });
