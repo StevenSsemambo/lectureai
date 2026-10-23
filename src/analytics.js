@@ -12,6 +12,8 @@
 // needs their access token; if that token has expired the batch is retried
 // without the account id (as an anonymous event) rather than being lost.
 
+import { queueEvents, drainQueue } from "./offline/eventQueue.js";
+
 let cfg = null;
 let buffer = [];
 let sent = 0;
@@ -102,11 +104,13 @@ export function flushEvents() {
           .then(async (res) => {
             if (res && (res.status === 401 || res.status === 403) && batch.some((r) => r.student_id)) {
               // expired sign-in: keep the data, drop only the account link
-              return post(c, batch.map((r) => ({ ...r, student_id: null })), null);
+              res = await post(c, batch.map((r) => ({ ...r, student_id: null })), null);
             }
+            // no connection, or the server is struggling: keep the events and send them later
+            if (res && (res.status >= 500 || res.status === 429 || res.status === 408)) queueEvents(batch);
             return res;
           })
-          .catch(() => {})
+          .catch(() => { queueEvents(batch); }) // offline: the fetch itself failed
       );
     }
     return Promise.all(jobs).then(() => {});
@@ -143,4 +147,19 @@ export async function postStandaloneEvents(c, rows, token) {
   } catch (e) {
     return null;
   }
+}
+
+// Send whatever was saved while offline. Call when the app starts and whenever the connection returns.
+// config: { url, key, getToken?, sendSession? }
+export async function flushQueuedEvents(config) {
+  if (!config || !config.url || !config.key) return { events: 0, sessions: 0 };
+  const sendRows = async (rows) => {
+    const token = config.getToken ? config.getToken() : null;
+    let res = await post(config, rows, token);
+    if (res && (res.status === 401 || res.status === 403) && rows.some((r) => r.student_id)) res = await post(config, rows.map((r) => ({ ...r, student_id: null })), null);
+    if (!res) return false;
+    if (res.ok) return true;
+    return !(res.status >= 500 || res.status === 429 || res.status === 408); // other errors will never succeed: drop them
+  };
+  return drainQueue({ sendEvents: sendRows, sendSession: config.sendSession || (async () => true) });
 }
