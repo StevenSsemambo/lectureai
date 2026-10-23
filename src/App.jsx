@@ -13,7 +13,7 @@ import { scrollTopForBlock } from "./slideKit/scroll.js";
 import { extractBlocks, matchSentenceToBlock } from "./slideKit/focus.js";
 import { logTiming, getTimingSummary } from "./telemetry.js";
 import { logClientError } from "./errorLogging.jsx";
-import { startTracking, track, flushEvents, stopTracking, getStudentKey, slideKeyFor, postStandaloneEvents } from "./analytics.js";
+import { startTracking, track, flushEvents, stopTracking, getStudentKey, slideKeyFor, postStandaloneEvents, flushQueuedEvents } from "./analytics.js";
 import { attentionScore, heatLevel, whyFlagged, formatDwell } from "./slideKit/insights.js";
 import CheckCard from "./slideKit/CheckCard.jsx";
 import { estimateMastery, estimateWithClaims, calibration as studentCalibration, conceptsToRevise } from "./learning/mastery.js";
@@ -26,6 +26,10 @@ import TeachingEffectPanel from "./learning/TeachingEffectPanel.jsx";
 import VoicePanel from "./voice/VoicePanel.jsx";
 import { loadPrefs as loadVoicePrefs, savePrefs as saveVoicePrefs, chooseVoice, clampRate } from "./voice/voicePrefs.js";
 import { createSessionManager, SessionExpiredError } from "./authSession.js";
+import { offlineStore } from "./offline/store.js";
+import { narrationFallback, saveNarration, hasNarration } from "./offline/narration.js";
+import { saveCoursesSnapshot, loadCoursesSnapshot, ageLabel } from "./offline/courseCache.js";
+import { queueSession } from "./offline/eventQueue.js";
 import { moduleToSetup, applyModuleSave, removeModule, duplicateModule, moveItem, blankSlide, courseDeleteConfirmed, nextActiveCourseId } from "./courseCrud.js";
 import { looksLikeEmail, accountLabel, recoveryCodeLooksValid, passwordError, recoveryCodeFile, friendlyAccountError } from "./accountHelpers.js";
 import { usernameError, normalizeUsername, fullNameError, cleanFullName, suggestUsername, friendlySignupError } from "./studentProfile.js";
@@ -625,8 +629,27 @@ async function suggestSlideImprovements(slide, evidence) {
 // the student leaves early) — public insert, no login required, same
 // reasoning as flagging a question. Fire-and-forget; a failed write
 // shouldn't block anyone from leaving the room.
+function sessionRow(session) {
+  return {
+    id: session.id || makeId("session"),
+    course_id: session.courseId,
+    module_id: session.moduleId,
+    student_id: session.studentId || null,
+    student_name: session.studentName || null,
+    completed: session.completed,
+    slides_reached: session.slidesReached,
+    total_slides: session.totalSlides,
+    question_count: session.questionCount,
+    transcript: session.transcript,
+    summary: session.summary || null,
+    started_at: session.startedAt,
+    research_consent: !!session.researchConsent,
+  };
+}
+
 async function recordSession(session, accessToken) {
   if (!supabaseEnabled() || !session.courseId || !session.moduleId) return;
+  const row = sessionRow(session);
   try {
     await supabaseRequest(
       "/sessions",
@@ -635,28 +658,14 @@ async function recordSession(session, accessToken) {
         // return=minimal: anonymous sessions (student_id null) can't be read
         // back by the inserter under RLS, so don't request the row back.
         headers: { Prefer: "return=minimal" },
-        body: JSON.stringify([
-          {
-            id: session.id || makeId("session"),
-            course_id: session.courseId,
-            module_id: session.moduleId,
-            student_id: session.studentId || null,
-            student_name: session.studentName || null,
-            completed: session.completed,
-            slides_reached: session.slidesReached,
-            total_slides: session.totalSlides,
-            question_count: session.questionCount,
-            transcript: session.transcript,
-            summary: session.summary || null,
-            started_at: session.startedAt,
-            research_consent: !!session.researchConsent,
-          },
-        ]),
+        body: JSON.stringify([row]),
       },
       accessToken
     );
   } catch (e) {
     console.error("Failed to record session:", e);
+    // no connection (or the server is struggling): keep the summary and send it when we're back online
+    if (!/\((4\d\d)\)/.test(String((e && e.message) || "")) || /\((408|429)\)/.test(String((e && e.message) || ""))) queueSession(row);
   }
 }
 
@@ -2616,6 +2625,7 @@ function LecturerDashboard({ courses, dbStatus, lecturerEmail, account, onAccoun
   const statusLabel = {
     connected: { text: "Connected to Supabase — courses persist across refreshes", cls: "ok" },
     loading: { text: "Connecting to Supabase…", cls: "loading" },
+    offline: { text: "You're offline — showing courses saved on this device. Changes can't be saved until you're back online.", cls: "warn" },
     error: { text: "Couldn't reach Supabase — working locally this session only", cls: "warn" },
     local: { text: "No database configured — changes are lost on refresh (see SUPABASE_URL in the code)", cls: "warn" },
   }[dbStatus];
@@ -3140,6 +3150,17 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
     return () => { window.speechSynthesis.removeEventListener && window.speechSynthesis.removeEventListener("voiceschanged", load); };
   }, []);
   const [aiNotice, setAiNotice] = useState("");
+  // ---- offline: is the device connected, and how much of this lecture is saved for replay?
+  const [online, setOnline] = useState(() => typeof navigator === "undefined" || navigator.onLine !== false);
+  useEffect(() => {
+    const up = () => { setOnline(true); setAiNotice((n) => (/offline/i.test(n) ? "" : n)); };
+    const down = () => setOnline(false);
+    window.addEventListener("online", up);
+    window.addEventListener("offline", down);
+    return () => { window.removeEventListener("online", up); window.removeEventListener("offline", down); };
+  }, []);
+  const [offlineSave, setOfflineSave] = useState({ phase: "idle", done: 0, total: 0 }); // idle | saving | done | partial
+  const saveForOfflineRef = useRef(null);
   const [audioBlocked, setAudioBlocked] = useState(false);
   const [sessionComplete, setSessionComplete] = useState(false);
   const [presentationMode, setPresentationMode] = useState(true);
@@ -3530,10 +3551,15 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
   // so a rate limit or provider error surfaces as a visible notice (and a
   // sensible spoken fallback line) instead of the lecturer just going
   // quiet or saying something generic with no explanation why.
-  const askLecturer = useCallback(async (system, prompt, fallback, kind = "live") => {
+  const askLecturer = useCallback(async (system, prompt, fallback, kind = "live", meta = null) => {
+    // No connection: don't wait for a request that cannot succeed. The saved lecture carries on.
+    if (typeof navigator !== "undefined" && navigator.onLine === false) {
+      setAiNotice("You're offline, so the lecturer is using what's saved on this device. New questions will have to wait until you're back online.");
+      return fallback;
+    }
     try {
       const text = await callAI(system, prompt, undefined, undefined, kind);
-      if (text) setAiNotice("");
+      if (text) { setAiNotice(""); if (meta) meta.ok = true; }
       return text || fallback;
     } catch (e) {
       setAiNotice(
@@ -3546,7 +3572,9 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
   }, []);
 
   const generateExplanation = useCallback(
-    async (targetSlide, plan) => {
+    async (targetSlide, plan, slideIdx = 0, meta = {}) => {
+      // what to say if the AI can't be reached: the narration it gave before, else the slide's own content
+      const fb = await narrationFallback(offlineStore(), moduleId, targetSlide, slideIdx);
       const system = `You are ${lecturerIdentity}. You are mid-lecture, speaking out loud to a room of students. Keep this explanation to about ${adaptWordBudget(plan, wordBudget)} words. ${NATURAL_SPEECH_STYLE}`;
       const followAlong = " Walk through the on-screen points in the order they appear on the slide, and use the slide's own key words for each point, so students can follow along as you speak.";
       const detailContext = followAlong + (targetSlide.detail ? ` On-screen supporting text: ${targetSlide.detail}` : "") +
@@ -3556,10 +3584,38 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
       const prompt = targetSlide.hasCode
         ? `Current slide: "${targetSlide.title}". Teaching notes: ${targetSlide.notes}${detailContext} You are about to type this code live on screen while you talk: ${targetSlide.code} Narrate it roughly in the order it will be typed, top to bottom, like you're writing it in front of the class.`
         : `Current slide: "${targetSlide.title}". Teaching notes: ${targetSlide.notes}${detailContext}`;
-      return askLecturer(system, prompt + adaptationPrompt(plan), "Sorry, I lost my train of thought for a moment — let's continue.", "explain");
+      const text = await askLecturer(system, prompt + adaptationPrompt(plan), fb.text, "explain", meta);
+      // keep the standard version on the device for offline replay (not the personalised variants)
+      if (meta.ok && plan && plan.level === "standard" && !plan.reminder && role !== "lecturer") saveNarration(offlineStore(), moduleId, targetSlide, slideIdx, text);
+      return text;
     },
-    [lecturerIdentity, wordBudget, askLecturer]
+    [lecturerIdentity, wordBudget, askLecturer, moduleId, role]
   );
+
+  // "Save for offline": ask the AI once for each slide's explanation (slides with scripted steps already carry
+  // their own spoken lines) and keep the text on the device, so the lecture can be replayed with no connection.
+  // It uses a few AI requests, one slide at a time, and only when the student chooses to.
+  saveForOfflineRef.current = async () => {
+    if (offlineSave.phase === "saving") return;
+    const slides = curriculum.slides;
+    const standard = { level: "standard", reminder: null, reason: null, concept: null, applied: false };
+    setOfflineSave({ phase: "saving", done: 0, total: slides.length });
+    let done = 0, misses = 0, stopped = false;
+    for (let i = 0; i < slides.length; i++) {
+      if (!mountedRef.current) return;
+      const slide = slides[i];
+      const already = buildStructuredUnits(slide) || (await hasNarration(offlineStore(), moduleId, slide, i));
+      if (!already) {
+        const meta = {};
+        await generateExplanation(slide, standard, i, meta);
+        if (!meta.ok) { misses += 1; if (misses >= 2) { stopped = true; break; } continue; }
+        await sleep(400); // gentle on the AI service's per-minute limit
+      }
+      done += 1;
+      if (mountedRef.current) setOfflineSave({ phase: "saving", done, total: slides.length });
+    }
+    if (mountedRef.current) setOfflineSave({ phase: stopped || done < slides.length ? "partial" : "done", done, total: slides.length });
+  };
 
   // Teaches one slide end-to-end: switches to the right view, explains it
   // (typing code live in sync with estimated speech duration), and — if
@@ -3612,7 +3668,7 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
         structuredUnits = [{ say: line, reveal: 0, lines: null }, ...structuredUnits];
       }
       const isWalkthrough = !!(targetSlide.hasCode && targetSlide.codeSteps && targetSlide.codeSteps.length);
-      const explanation = structuredUnits ? structuredUnits.map((u) => u.say).join(" ") : await generateExplanation(targetSlide, plan);
+      const explanation = structuredUnits ? structuredUnits.map((u) => u.say).join(" ") : await generateExplanation(targetSlide, plan, index);
       if (stale()) return;
       addMessage("lecturer", explanation, "explain");
       setLecturerState2("explaining");
@@ -3881,7 +3937,9 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
       const ackPromise = speakInterruptible(ack, { onStart: () => logTiming("qa_ack_start", { client_ms: performance.now() - tQuestion }) });
 
       const answerBudget = Math.max(45, Math.round(wordBudget * 0.6));
-      const fallbackAnswer = "Good question — let me pick that up right after this.";
+      const fallbackAnswer = typeof navigator !== "undefined" && navigator.onLine === false
+        ? "You're offline right now, so I can't answer new questions. Ask me again when you're back online, and carry on with the saved lecture in the meantime."
+        : "Good question — let me pick that up right after this.";
       // Structured output so the AI honestly self-assesses whether it
       // actually knows this, rather than answering everything with the
       // same undifferentiated confidence. This is the whole point of the
@@ -4328,6 +4386,11 @@ ${NATURAL_SPEECH_STYLE}`;
           <button className={`topbar-edit ${presentationMode ? "on" : ""}`} onClick={togglePresentationMode} title="Toggle presentation mode (bigger slide view)" aria-pressed={presentationMode}>
             {presentationMode ? <Minimize2 size={13} /> : <Maximize2 size={13} />} {presentationMode ? "Exit presentation" : "Presentation mode"}
           </button>
+          {role !== "lecturer" && online && (
+            <button className={`topbar-edit ${offlineSave.phase === "done" ? "on" : ""}`} disabled={offlineSave.phase === "saving"} onClick={() => saveForOfflineRef.current && saveForOfflineRef.current()} title="Keeps this lecture's explanations on this device, so you can replay it later without internet. Uses a few AI requests once.">
+              ⬇ {offlineSave.phase === "saving" ? `Saving ${offlineSave.done}/${offlineSave.total}…` : offlineSave.phase === "done" ? "Saved for offline" : offlineSave.phase === "partial" ? `Saved ${offlineSave.done}/${offlineSave.total} — try again` : "Save for offline"}
+            </button>
+          )}
           {role !== "lecturer" && (
             <button className={`topbar-edit ${adaptOn ? "on" : ""}`} onClick={() => setAdaptOn((v) => !v)} aria-pressed={adaptOn} title="When on, the lecturer adapts explanations to how you're doing (more steps when you're finding something hard, shorter when you already know it). Turn it off for the standard lecture.">
               ✨ Personalised: {adaptOn ? "on" : "off"}
@@ -4363,7 +4426,12 @@ ${NATURAL_SPEECH_STYLE}`;
           <AlertTriangle size={12} /> {ttsNotice}
         </div>
       )}
-      {aiNotice && (
+      {!online && (
+        <div className="tts-notice" role="status">
+          <AlertTriangle size={12} /> You're offline. The lecture plays from what's saved on this device. Your quiz answers are kept and will be sent when you're back online.
+        </div>
+      )}
+      {aiNotice && online && (
         <div className="tts-notice">
           <AlertTriangle size={12} /> {aiNotice}
         </div>
@@ -4606,7 +4674,37 @@ export default function SEMAIApp() {
   const [shareWithLecturer, setShareWithLecturer] = useState(false);
   // null = signed in but no profile yet, undefined = unknown / not loaded, object = {username, fullName}
   const [studentProfile, setStudentProfile] = useState(undefined);
-  const [dbStatus, setDbStatus] = useState(supabaseEnabled() ? "loading" : "local"); // loading | connected | error | local
+  const [dbStatus, setDbStatus] = useState(supabaseEnabled() ? "loading" : "local"); // loading | connected | offline | error | local
+  const [offlineSavedAt, setOfflineSavedAt] = useState(null); // when the saved copy of the courses was made
+  const [reloadCoursesTick, setReloadCoursesTick] = useState(0);
+  // Send anything saved while offline, as soon as the connection is back (and at start-up).
+  useEffect(() => {
+    if (!supabaseEnabled()) return undefined;
+    const flush = () => {
+      if (typeof navigator !== "undefined" && navigator.onLine === false) return;
+      flushQueuedEvents({
+        url: SUPABASE_URL,
+        key: SUPABASE_ANON_KEY,
+        getToken: () => (studentSessionRef.current ? studentSessionRef.current.accessToken : null),
+        sendSession: async (row) => {
+          try {
+            await supabaseRequest("/sessions", { method: "POST", headers: { Prefer: "return=minimal" }, body: JSON.stringify([row]) }, studentSessionRef.current ? studentSessionRef.current.accessToken : null);
+            return true;
+          } catch (e) {
+            const m = String((e && e.message) || "");
+            if (/\((401|403)\)/.test(m) && row.student_id) { // expired sign-in: keep the summary, drop only the account link
+              try { await supabaseRequest("/sessions", { method: "POST", headers: { Prefer: "return=minimal" }, body: JSON.stringify([{ ...row, student_id: null }]) }); return true; } catch (e2) { return false; }
+            }
+            return /\((4\d\d)\)/.test(m) && !/\((408|429)\)/.test(m); // other client errors will never succeed: drop
+          }
+        },
+      }).catch(() => {});
+    };
+    const onOnline = () => { flush(); setReloadCoursesTick((n) => n + 1); };
+    flush();
+    window.addEventListener("online", onOnline);
+    return () => window.removeEventListener("online", onOnline);
+  }, []);
   const [session, setSession] = useState(null); // { accessToken, refreshToken, user: {id, email} } | null
   // Keeps the lecturer's token fresh for every cloud write (see authSession.js). The manager is created
   // once; it always reads the latest session through sessionMgr.set() below.
@@ -4621,7 +4719,9 @@ export default function SEMAIApp() {
   const runAuthed = useCallback((fn) => sessionMgr.run(fn), [sessionMgr]);
   const cloudCoursesRef = useRef(new Set()); // course ids known to exist in the cloud
   const cloudQueueRef = useRef(Promise.resolve()); // cloud writes run one after another, in order
-  const [studentSession, setStudentSession] = useState(null); // same shape, separate identity/storage — a student account isn't a lecturer account
+  const [studentSession, setStudentSession] = useState(null); // same shape, separate identity/storage
+  const studentSessionRef = useRef(null);
+  studentSessionRef.current = studentSession; // a student account isn't a lecturer account
   const [legalReturnStage, setLegalReturnStage] = useState("splash");
 
   // Try to restore a lecturer session on load (refreshing it, since access
@@ -4677,16 +4777,26 @@ export default function SEMAIApp() {
         loaded.forEach((c) => cloudCoursesRef.current.add(c.id));
         setCourses(loaded.length > 0 ? loaded : [DEFAULT_COURSE]);
         setDbStatus("connected");
+        setOfflineSavedAt(null);
+        saveCoursesSnapshot(offlineStore(), loaded); // so lectures can still open with no connection
       })
       .catch((e) => {
         if (cancelled) return;
         console.error("Supabase load failed:", e);
-        setDbStatus("error");
+        // no connection: open the lectures saved on this device last time
+        loadCoursesSnapshot(offlineStore()).then((snap) => {
+          if (cancelled) return;
+          if (snap) {
+            setCourses(snap.courses);
+            setOfflineSavedAt(snap.savedAt);
+            setDbStatus("offline");
+          } else setDbStatus("error");
+        });
       });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [reloadCoursesTick]);
 
   const emptySetup = () => ({
     moduleSettings: { ...DEFAULT_MODULE_DRAFT_SETTINGS },
