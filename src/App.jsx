@@ -24,6 +24,7 @@ import MasteryPanel from "./learning/MasteryPanel.jsx";
 import RosterPanel from "./learning/RosterPanel.jsx";
 import TeachingEffectPanel from "./learning/TeachingEffectPanel.jsx";
 import VoicePanel from "./voice/VoicePanel.jsx";
+import StylePanel from "./persona/StylePanel.jsx";
 import { loadPrefs as loadVoicePrefs, savePrefs as saveVoicePrefs, chooseVoice, clampRate } from "./voice/voicePrefs.js";
 import { createSessionManager, SessionExpiredError } from "./authSession.js";
 import { offlineStore } from "./offline/store.js";
@@ -41,6 +42,8 @@ import { welcomeBackLine, createPauseTracker, breakNudgeDue, BREAK_NUDGE_TEXT, p
 import FlagReviewCard from "./learning/FlagReviewCard.jsx";
 import { PERSONAS, PERSONA_IDS, MAX_NAME, MAX_NOTE, DEFAULT_PERSONA, resolvePersona, lecturerIdentityFor, introPreview, introGuidance, sanitizeName, sanitizeStyleNote } from "./persona/persona.js";
 import { quizFeedback, questionAck } from "./persona/feedback.js";
+import { careDue, careLine, careReply, CARE_CHOICES } from "./persona/care.js";
+import { loadPrefs, savePrefs, feedbackCharacter, styleLine, FEEDBACK_STYLES } from "./persona/studentPrefs.js";
 import { buildWelcomeFacts, welcomeGuidance } from "./persona/welcome.js";
 import { newCheckState, chooseOption as chooseCheckState, finishCheck as finishCheckState, skipCheck as skipCheckState } from "./slideKit/checkFlow.js";
 import {
@@ -2778,24 +2781,7 @@ function LecturerDashboard({ courses, dbStatus, lecturerEmail, account, onAccoun
 // event log through a database function that applies row-level security, so a
 // lecturer only ever sees events from their own courses.
 // ---------------------------------------------------------------------------
-// A titled section that stays closed until the lecturer opens it. Children are only mounted
-// while open, so anything that loads data on mount (like the slide analytics) waits for the click.
-function CollapsibleSection({ title, hint, nested = false, defaultOpen = false, children }) {
-  const [open, setOpen] = useState(defaultOpen);
-  const uid = useRef(`cs-${Math.random().toString(36).slice(2, 9)}`).current;
-  return (
-    <div className={nested ? "collapse-box nested" : "flag-section collapse-box"}>
-      <button type="button" className="collapse-head" aria-expanded={open} aria-controls={uid} onClick={() => setOpen((o) => !o)}>
-        <span className={nested ? "collapse-title nested" : "flag-section-title collapse-title"}>{title}</span>
-        {hint && <span className="collapse-hint">{hint}</span>}
-        <span className="collapse-chevron" aria-hidden="true">{open ? "▾" : "▸"}</span>
-      </button>
-      {open && <div className="collapse-body" id={uid}>{children}</div>}
-    </div>
-  );
-}
-
-function SlideAnalyticsBody({ course, session }) {
+function SlideAnalyticsPanel({ course, session }) {
   const modules = course.modules || [];
   const [moduleId, setModuleId] = useState(modules.length ? modules[0].id : null);
   const [rows, setRows] = useState(null);
@@ -2844,7 +2830,8 @@ function SlideAnalyticsBody({ course, session }) {
     }
   };
   return (
-    <div>
+    <div className="flag-section">
+      <div className="flag-section-title">Slide analytics</div>
       {modules.length === 0 ? (
         <div className="empty-hint">Add a module to see how students get on with each slide.</div>
       ) : (
@@ -2916,14 +2903,16 @@ function SlideAnalyticsBody({ course, session }) {
                 </table>
               </div>
               {quizSummary.concepts.length > 0 && (
-                <CollapsibleSection nested title="Understanding by concept" hint={`${quizSummary.concepts.length} concept${quizSummary.concepts.length === 1 ? "" : "s"}`}>
+                <>
+                  <div className="flag-section-title" style={{ marginTop: 18 }}>Understanding by concept</div>
                   <ConceptTable concepts={quizSummary.concepts} />
-                </CollapsibleSection>
+                </>
               )}
               {misconceptions.length > 0 && (
-                <CollapsibleSection nested title="Common wrong answers (misconceptions)" hint={`${misconceptions.length} found`}>
+                <>
+                  <div className="flag-section-title" style={{ marginTop: 18 }}>Common wrong answers (misconceptions)</div>
                   <MisconceptionList items={misconceptions} slideTitle={slideTitleAt} />
-                </CollapsibleSection>
+                </>
               )}
               <p className="account-text">Needs attention combines wrong quiz answers, “unsure/lost” taps and questions asked on that slide. A slide is only scored once enough students have given data.</p>
             </>
@@ -2931,14 +2920,6 @@ function SlideAnalyticsBody({ course, session }) {
         </>
       )}
     </div>
-  );
-}
-
-function SlideAnalyticsPanel({ course, session }) {
-  return (
-    <CollapsibleSection title="Slide analytics" hint="Time, quiz results and confusion for each slide">
-      <SlideAnalyticsBody course={course} session={session} />
-    </CollapsibleSection>
   );
 }
 
@@ -3032,51 +3013,30 @@ function CourseInsightsScreen({ course, session, runAuthed, onBack }) {
               <div className="empty-hint">No sessions recorded yet — this fills in once a student attends a lecture.</div>
             ) : (
               <div className="flag-list">
-                {sessions.map((s) => {
-                  const open = expandedSessionId === s.id;
-                  const mod = (course.modules || []).find((m) => m.id === s.module_id);
-                  const mins = s.started_at && s.ended_at ? Math.round((new Date(s.ended_at) - new Date(s.started_at)) / 60000) : null;
-                  const pct = s.total_slides > 0 ? Math.min(100, Math.round(((s.slides_reached || 0) / s.total_slides) * 100)) : 0;
-                  return (
-                    <div className={`session-item ${open ? "open" : ""}`} key={s.id}>
-                      {/* Collapsed row: just who, when, and how it went. Everything else waits for a click. */}
-                      <button
-                        type="button"
-                        className="session-row"
-                        aria-expanded={open}
-                        aria-controls={`session-detail-${s.id}`}
-                        onClick={() => setExpandedSessionId((id) => (id === s.id ? null : s.id))}
-                      >
-                        <span className="session-row-name">{s.student_name || "Student"}</span>
-                        <span className="session-row-date">{new Date(s.ended_at).toLocaleString()}</span>
-                        <span className={s.completed ? "session-badge complete" : "session-badge incomplete"}>
-                          {s.completed ? "Completed" : "Left early"}
-                        </span>
-                        <span className="session-row-chevron" aria-hidden="true">{open ? "▾" : "▸"}</span>
-                      </button>
-                      {open && (
-                        <div className="session-detail" id={`session-detail-${s.id}`}>
-                          <div className="session-stats">
-                            {mod && <div><span>Module</span>{mod.unit}</div>}
-                            <div><span>Slides reached</span>{s.slides_reached || 0}/{s.total_slides || 0} ({pct}%)</div>
-                            <div><span>Questions asked</span>{s.question_count || 0}</div>
-                            {mins !== null && <div><span>Time in lecture</span>{mins < 1 ? "under a minute" : `${mins} min`}</div>}
-                          </div>
-                          {s.summary && <div className="flag-card-answer">{s.summary}</div>}
-                          <div className="session-transcript-title">Transcript</div>
-                          <div className="session-transcript">
-                            {(s.transcript || []).length === 0 && <div className="session-transcript-line">No transcript was recorded for this session.</div>}
-                            {(s.transcript || []).map((m, i) => (
-                              <div key={i} className="session-transcript-line">
-                                <strong>{m.speaker === "lecturer" ? "Lecturer" : m.speaker}:</strong> {m.text}
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
+                {sessions.map((s) => (
+                  <div className="flag-card" key={s.id}>
+                    <div className="flag-card-meta">
+                      {s.student_name || "Student"} · {new Date(s.ended_at).toLocaleString()} ·{" "}
+                      <span className={s.completed ? "session-badge complete" : "session-badge incomplete"}>
+                        {s.completed ? "Completed" : `Left early (${s.slides_reached}/${s.total_slides} slides)`}
+                      </span>{" "}
+                      · {s.question_count} question{s.question_count === 1 ? "" : "s"}
                     </div>
-                  );
-                })}
+                    {s.summary && <div className="flag-card-answer">{s.summary}</div>}
+                    <button className="nav-btn" onClick={() => setExpandedSessionId((id) => (id === s.id ? null : s.id))}>
+                      {expandedSessionId === s.id ? "Hide transcript" : "View transcript"}
+                    </button>
+                    {expandedSessionId === s.id && (
+                      <div className="session-transcript">
+                        {(s.transcript || []).map((m, i) => (
+                          <div key={i} className="session-transcript-line">
+                            <strong>{m.speaker === "lecturer" ? "Lecturer" : m.speaker}:</strong> {m.text}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
               </div>
             )}
           </div>
@@ -3215,6 +3175,7 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
   const voicePrefsRef = useRef(voicePrefs);
   const [voices, setVoices] = useState([]);
   const [voiceOpen, setVoiceOpen] = useState(false);
+  const [styleOpen, setStyleOpen] = useState(false);
   const voiceLang = (typeof navigator !== "undefined" && navigator.language) || "en";
   useEffect(() => { voicePrefsRef.current = voicePrefs; saveVoicePrefs(voicePrefs); }, [voicePrefs]);
   useEffect(() => {
@@ -3430,9 +3391,17 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
   const followLecturer = () => setUserScrolled(false); // the effect above scrolls straight back to what's being discussed
   const wordBudget = computeWordBudget(settings.durationMinutes, curriculum.slides.length, settings.pace);
   const toneDesc = (TONE_OPTIONS.find((t) => t.id === settings.tone) || TONE_OPTIONS[0]).desc;
+  const [stylePrefs, setStylePrefs] = useState(() => loadPrefs());
+  const stylePrefsRef = useRef(stylePrefs);
+  const updateStylePrefs = (patch) => setStylePrefs((p) => { const n = { ...p, ...patch }; stylePrefsRef.current = n; savePrefs(n); return n; });
   const personaCourse = { code: curriculum.code, title: curriculum.title, lecturerName: settings.lecturerName, lecturerPersona: settings.lecturerPersona, lecturerStyleNote: settings.lecturerStyleNote };
   const personaId = resolvePersona(personaCourse).id;
-  const lecturerIdentity = lecturerIdentityFor(personaCourse, { toneDesc, institution: settings.institution }).replace(/\.\s*$/, "");
+  const lecturerIdentity = (lecturerIdentityFor(personaCourse, { toneDesc, institution: settings.institution }).replace(/\.\s*$/, "") + styleLine(stylePrefs)).replace(/\.\s*$/, "");
+  const [careOffer, setCareOffer] = useState(null); // { line } while the lecturer is offering slower / break / carry on
+  const careResolveRef = useRef(null);
+  const signalLogRef = useRef([]); // this lecture's "I'm lost" etc. taps: [{slide, value}]
+  const lastCareOfferRef = useRef(0);
+  const careOffersMadeRef = useRef(0);
   const lastFeedbackKeyRef = useRef(null);
   const lastAckKeyRef = useRef(null);
   // Feedback that answers what the student actually did: recovering after a miss, a run of right answers,
@@ -3449,7 +3418,7 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
       priorMisses: priorSess.filter((e) => !e.correct).length,
       everWeak: priorHist.filter((e) => !e.correct).length >= 2,
       streak: outcome.correct ? streak : 0,
-      name: studentName, personaId, last: lastFeedbackKeyRef.current,
+      name: stylePrefsRef.current.useName ? studentName : "", personaId: feedbackCharacter(stylePrefsRef.current, personaId), last: lastFeedbackKeyRef.current,
     });
     lastFeedbackKeyRef.current = r.key;
     return r.text;
@@ -3731,7 +3700,7 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
       setLecturerState2("loading");
 
       // After a long unbroken stretch, a gentle suggestion to rest (never forced, never repeated within another full stretch)
-      if (role !== "lecturer" && index > 0 && breakNudgeDue({ focusStartMs: focusStartRef.current, now: Date.now(), lastNudgeMs: lastNudgeRef.current })) {
+      if (role !== "lecturer" && index > 0 && stylePrefsRef.current.careOffers && breakNudgeDue({ focusStartMs: focusStartRef.current, now: Date.now(), lastNudgeMs: lastNudgeRef.current })) {
         lastNudgeRef.current = Date.now();
         track("break_nudge", slideInfo(index), null);
         addMessage("lecturer", BREAK_NUDGE_TEXT, "explain");
@@ -3740,6 +3709,45 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
         if (stale()) return;
         if (!nudged) await waitForIdle();
         setLecturerState2("loading");
+      }
+
+      // The student has told us it is going badly (taps, wrong answers): offer slower / a break / carrying on. Their choice rules.
+      if (role !== "lecturer" && index > 0) {
+        const due = careDue({
+          signals: signalLogRef.current, answers: sessionEvidenceRef.current.filter((e) => !e.diagnostic), slideIndex: index,
+          prefs: stylePrefsRef.current, now: Date.now(), lastOfferMs: lastCareOfferRef.current, offersMade: careOffersMadeRef.current,
+        });
+        if (due && !stale()) {
+          lastCareOfferRef.current = Date.now();
+          careOffersMadeRef.current += 1;
+          const fam = feedbackCharacter(stylePrefsRef.current, personaId);
+          const line = careLine(fam, stylePrefsRef.current.useName ? studentName : "");
+          track("signal", slideInfo(index), { value: "care_offer", reason: due.reason });
+          addMessage("lecturer", line, "explain");
+          setLecturerState2("explaining");
+          const choiceP = new Promise((resolve) => { careResolveRef.current = resolve; setCareOffer({ line }); setTimeout(() => resolve(null), 25000); });
+          const lineDone = await speakInterruptible(line);
+          if (stale()) { setCareOffer(null); return; }
+          if (!lineDone) await waitForIdle();
+          setLecturerState2("idle");
+          const choice = await choiceP;
+          setCareOffer(null);
+          careResolveRef.current = null;
+          if (stale()) return;
+          if (choice) {
+            track("signal", slideInfo(index), { value: "care_choice", choice });
+            const reply = careReply(choice, fam);
+            addMessage("lecturer", reply, "explain");
+            setLecturerState2("explaining");
+            await speakInterruptible(reply);
+            if (stale()) return;
+            setLecturerState2("loading");
+            if (choice === "slower") sessionAdaptRef.current.lostSlides.add(index);
+            if (choice === "break") pauseLecture("manual");
+          } else {
+            setLecturerState2("loading");
+          }
+        }
       }
 
       // How should THIS slide be taught to THIS student right now? (never skips content or changes assessment)
@@ -4029,7 +4037,7 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
       // generating the real answer happen concurrently so the answer is
       // ready (or close to it) by the time the acknowledgment finishes,
       // rather than adding its speaking time as pure extra latency.
-      const ackPick = questionAck({ name: studentName, personaId, last: lastAckKeyRef.current });
+      const ackPick = questionAck({ name: stylePrefsRef.current.useName ? studentName : "", personaId: feedbackCharacter(stylePrefsRef.current, personaId), last: lastAckKeyRef.current });
       lastAckKeyRef.current = ackPick.key;
       const ack = ackPick.text;
       addMessage("lecturer", ack, "explain");
@@ -4191,7 +4199,7 @@ ${NATURAL_SPEECH_STYLE}`;
       const evidenceKey = `${c.diagnostic ? "d" : ""}${c.index}:${c.chosen}`;
       if (lastEvidenceKeyRef.current !== evidenceKey) {
         lastEvidenceKeyRef.current = evidenceKey;
-        sessionEvidenceRef.current.push({ concept: c.check.concept, correct: r.event.correct, confidence: r.event.confidence, ts: Date.now() });
+        sessionEvidenceRef.current.push({ concept: c.check.concept, correct: r.event.correct, confidence: r.event.confidence, ts: Date.now(), diagnostic: !!c.diagnostic });
         if (!r.event.correct && c.check.concept) sessionAdaptRef.current.wrongConcepts.add(c.check.concept);
       }
       const resolve = checkResolverRef.current;
@@ -4277,6 +4285,7 @@ ${NATURAL_SPEECH_STYLE}`;
     if (signals[slideIndex] === value) return;
     setSignals((s) => ({ ...s, [slideIndex]: value }));
     track("signal", currentInfo(), { value, focus: focusIdRef.current });
+    signalLogRef.current.push({ slide: slideIndex, value });
     if (value === "lost") sessionAdaptRef.current.lostSlides.add(slideIndex);
     if (value === "lost") handleQuestion("I'm lost on this part. Could you explain it again in a simpler way, with a different example?");
   };
@@ -4472,6 +4481,11 @@ ${NATURAL_SPEECH_STYLE}`;
           >
             <Volume2 size={13} /> {audioBlocked ? "Tap to enable sound" : "Replay voice"}
           </button>
+          {role !== "lecturer" && (
+            <button className="topbar-edit" onClick={() => setStyleOpen(true)} aria-haspopup="dialog" title="Choose how the lecturer talks to you: short or encouraging, using your name, offers of a break">
+              🙂 My style
+            </button>
+          )}
           <button className="topbar-edit" onClick={() => setVoiceOpen(true)} aria-haspopup="dialog" title="Change the lecturer's voice and speed">
             🎙 Voice &amp; speed ({`${clampRate(voicePrefs.rate)}×`})
           </button>
@@ -4509,6 +4523,7 @@ ${NATURAL_SPEECH_STYLE}`;
         </div>
       </div>
       {moreOpen && <div className="topbar-scrim" onClick={() => setMoreOpen(false)} />}
+      <StylePanel open={styleOpen} onClose={() => setStyleOpen(false)} prefs={stylePrefs} onChange={updateStylePrefs} lecturerName={resolvePersona(personaCourse).name} />
       <VoicePanel
         open={voiceOpen}
         onClose={() => setVoiceOpen(false)}
@@ -4633,6 +4648,14 @@ ${NATURAL_SPEECH_STYLE}`;
             </button>
           </div>
 
+          {careOffer && role !== "lecturer" && (
+            <div className="signal-row care-offer" role="group" aria-label="Would you like some help?">
+              <span className="signal-label">{careOffer.line}</span>
+              {CARE_CHOICES.map((c) => (
+                <button key={c.id} className="signal-btn" onClick={() => { const r = careResolveRef.current; if (r) r(c.id); }}>{c.label}</button>
+              ))}
+            </div>
+          )}
           {role !== "lecturer" && (
             <div className="signal-row" role="group" aria-label="How are you finding this slide?">
               <span className="signal-label">How is this going?</span>
@@ -5305,32 +5328,6 @@ function GlobalStyles() {
       .session-badge { font-weight: 600; }
       .session-badge.complete { color: #6FBF8A; }
       .session-badge.incomplete { color: #E8A33D; }
-      .collapse-box.nested { margin-top: 12px; border: 1px solid #232A35; border-radius: 10px; background: #14181F; }
-      .collapse-head { width: 100%; display: flex; align-items: center; gap: 10px; padding: 8px 2px; background: none; border: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; }
-      .collapse-box.nested > .collapse-head { padding: 10px 12px; }
-      .collapse-head:hover .collapse-title { color: #fff; }
-      .collapse-head:focus-visible { outline: 2px solid #E8A33D; outline-offset: 2px; border-radius: 6px; }
-      .collapse-title { margin: 0; flex: 0 1 auto; }
-      .collapse-title.nested { font-size: 13px; font-weight: 600; color: #E6E9EE; }
-      .collapse-hint { flex: 1 1 auto; min-width: 0; font-size: 11px; color: #8890A0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .collapse-chevron { color: #8890A0; font-size: 12px; width: 12px; text-align: center; }
-      .collapse-body { padding-top: 8px; }
-      .collapse-box.nested > .collapse-body { padding: 0 12px 12px; }
-      .session-item { background: #14181F; border: 1px solid #232A35; border-radius: 10px; overflow: hidden; }
-      .session-item.open { border-color: #3A4556; }
-      .session-row { width: 100%; display: flex; align-items: center; gap: 12px; padding: 10px 12px; background: none; border: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; }
-      .session-row:hover { background: #1A1F27; }
-      .session-row:focus-visible { outline: 2px solid #E8A33D; outline-offset: -2px; }
-      .session-row-name { font-weight: 600; font-size: 13px; color: #E6E9EE; min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .session-row-date { font-size: 11px; color: #8890A0; white-space: nowrap; }
-      .session-row .session-badge { font-size: 11px; white-space: nowrap; }
-      .session-row-chevron { color: #8890A0; font-size: 12px; width: 12px; text-align: center; }
-      .session-detail { padding: 4px 12px 12px; display: flex; flex-direction: column; gap: 10px; border-top: 1px solid #232A35; }
-      .session-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin-top: 10px; font-size: 12px; color: #C7CCD4; }
-      .session-stats span { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: #8890A0; margin-bottom: 2px; }
-      .session-transcript-title { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: #8890A0; }
-      .session-detail .session-transcript { margin-top: 0; }
-      @media (max-width: 520px) { .session-row { flex-wrap: wrap; gap: 4px 10px; } .session-row-date { order: 3; flex-basis: 100%; } }
       .session-transcript { margin-top: 8px; padding: 10px; background: #1A1F27; border-radius: 8px; max-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
       .session-transcript-line { font-size: 12px; color: #C7CCD4; line-height: 1.5; }
       @media (max-width: 600px) {
