@@ -118,7 +118,7 @@ function Summary({ slide, focusId }) {
   );
 }
 
-export default function SlideView({ slide, unit, index, total, revealCount = Infinity, showWarnings = false, footer = null, focusId = null }) {
+export default function SlideView({ slide, unit, index, total, revealCount = Infinity, showWarnings = false, footer = null, focusId = null, hideCounter = false }) {
   const t = slide.type;
   const visual = slide.diagram || slide.plot;
   return (
@@ -126,7 +126,7 @@ export default function SlideView({ slide, unit, index, total, revealCount = Inf
       <header className="sk-header">
         <div className="slide-eyebrow">
           <span>{unit}</span>
-          <span>{t !== "concept" && <span className="sk-type-chip">{TYPE_LABELS[t]}</span>} {index + 1} / {total}</span>
+          <span>{t !== "concept" && <span className="sk-type-chip">{TYPE_LABELS[t]}</span>}{!hideCounter && <> {index + 1} / {total}</>}</span>
         </div>
         <h2><Rich text={slide.title} /></h2>
       </header>

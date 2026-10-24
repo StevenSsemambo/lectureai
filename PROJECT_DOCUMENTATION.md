@@ -215,3 +215,15 @@ and manifest generate correctly):
 - Lecturer-facing session analytics/summaries after a lecture ends.
 - Confidence scoring / escalation to a human lecturer when the AI is unsure.
 
+
+## Question detours (on-screen answers)
+
+When a student's question is best answered by showing something, the AI lecturer puts a temporary **board** on screen (a Mermaid diagram, a short explanation slide, new code, or highlighted lines of the code already on the slide), talks the student through it, then returns to exactly where the lecture was.
+
+- **Code:** `src/detour/detour.js` (pure logic: prompt addendum, tolerant parser, board builder, validation, timing controller), `src/detour/DetourBoard.jsx` + `detour.css` (the board). Wired into `LectureRoom.handleQuestion` in `src/App.jsx`.
+- **The lecture is never modified.** A detour is an overlay in separate state; the real slide stays mounted underneath (hidden), so slide index, typed code, reveal progress, quiz checks, analytics and session records are untouched.
+- **Fails safe.** Bad JSON, an invalid diagram (one AI repair attempt, 6 s cap), oversized content or any error means no board: the lecturer just answers aloud as before. Truncated AI replies are never read out as raw JSON.
+- **Controls:** the board returns by itself a few seconds after the answer; "Keep open" holds it; "Back to lecture" or Escape closes it. A new question, Prev/Next or switching view also closes it.
+- **Kill switch:** `localStorage.setItem("semai_detours", "off")` in a browser disables it there (the AI prompt reverts to the old one).
+- **Analytics:** `ai_answer` events gain an optional `visual` field in their payload (no schema change).
+- **Tests:** `npm test` runs `.tests/t_detour.mjs` (parser/builder/validation), `t_detour_controller.mjs` (timing, pinning, new-question races) and `t_detour_render.mjs` (real React render of every board kind).

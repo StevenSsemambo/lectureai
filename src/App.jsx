@@ -40,6 +40,8 @@ import { generatePractice } from "./learning/practice.js";
 import { pickDiagnostic, diagnosticLead, diagnosticNoGap, diagnosticGapPrompt, diagnosticGapFallback } from "./learning/diagnose.js";
 import { welcomeBackLine, createPauseTracker, breakNudgeDue, BREAK_NUDGE_TEXT, pauseHotspot, engagementSummary, focusRhythmText } from "./learning/pauses.js";
 import FlagReviewCard from "./learning/FlagReviewCard.jsx";
+import DetourBoard from "./detour/DetourBoard.jsx";
+import { VISUAL_PROMPT, parseAnswerWithVisual, buildDetourBoard, checkBoard, cleanMermaid, mermaidRepairPrompt, holdMs, detoursEnabled, boardContext, createDetourController } from "./detour/detour.js";
 import { PERSONAS, PERSONA_IDS, MAX_NAME, MAX_NOTE, DEFAULT_PERSONA, resolvePersona, lecturerIdentityFor, introPreview, introGuidance, sanitizeName, sanitizeStyleNote } from "./persona/persona.js";
 import { quizFeedback, questionAck } from "./persona/feedback.js";
 import { careDue, careLine, careReply, CARE_CHOICES } from "./persona/care.js";
@@ -2781,7 +2783,24 @@ function LecturerDashboard({ courses, dbStatus, lecturerEmail, account, onAccoun
 // event log through a database function that applies row-level security, so a
 // lecturer only ever sees events from their own courses.
 // ---------------------------------------------------------------------------
-function SlideAnalyticsPanel({ course, session }) {
+// A titled section that stays closed until the lecturer opens it. Children are only mounted
+// while open, so anything that loads data on mount (like the slide analytics) waits for the click.
+function CollapsibleSection({ title, hint, nested = false, defaultOpen = false, children }) {
+  const [open, setOpen] = useState(defaultOpen);
+  const uid = useRef(`cs-${Math.random().toString(36).slice(2, 9)}`).current;
+  return (
+    <div className={nested ? "collapse-box nested" : "flag-section collapse-box"}>
+      <button type="button" className="collapse-head" aria-expanded={open} aria-controls={uid} onClick={() => setOpen((o) => !o)}>
+        <span className={nested ? "collapse-title nested" : "flag-section-title collapse-title"}>{title}</span>
+        {hint && <span className="collapse-hint">{hint}</span>}
+        <span className="collapse-chevron" aria-hidden="true">{open ? "▾" : "▸"}</span>
+      </button>
+      {open && <div className="collapse-body" id={uid}>{children}</div>}
+    </div>
+  );
+}
+
+function SlideAnalyticsBody({ course, session }) {
   const modules = course.modules || [];
   const [moduleId, setModuleId] = useState(modules.length ? modules[0].id : null);
   const [rows, setRows] = useState(null);
@@ -2830,8 +2849,7 @@ function SlideAnalyticsPanel({ course, session }) {
     }
   };
   return (
-    <div className="flag-section">
-      <div className="flag-section-title">Slide analytics</div>
+    <div>
       {modules.length === 0 ? (
         <div className="empty-hint">Add a module to see how students get on with each slide.</div>
       ) : (
@@ -2903,16 +2921,14 @@ function SlideAnalyticsPanel({ course, session }) {
                 </table>
               </div>
               {quizSummary.concepts.length > 0 && (
-                <>
-                  <div className="flag-section-title" style={{ marginTop: 18 }}>Understanding by concept</div>
+                <CollapsibleSection nested title="Understanding by concept" hint={`${quizSummary.concepts.length} concept${quizSummary.concepts.length === 1 ? "" : "s"}`}>
                   <ConceptTable concepts={quizSummary.concepts} />
-                </>
+                </CollapsibleSection>
               )}
               {misconceptions.length > 0 && (
-                <>
-                  <div className="flag-section-title" style={{ marginTop: 18 }}>Common wrong answers (misconceptions)</div>
+                <CollapsibleSection nested title="Common wrong answers (misconceptions)" hint={`${misconceptions.length} found`}>
                   <MisconceptionList items={misconceptions} slideTitle={slideTitleAt} />
-                </>
+                </CollapsibleSection>
               )}
               <p className="account-text">Needs attention combines wrong quiz answers, “unsure/lost” taps and questions asked on that slide. A slide is only scored once enough students have given data.</p>
             </>
@@ -2920,6 +2936,14 @@ function SlideAnalyticsPanel({ course, session }) {
         </>
       )}
     </div>
+  );
+}
+
+function SlideAnalyticsPanel({ course, session }) {
+  return (
+    <CollapsibleSection title="Slide analytics" hint="Time, quiz results and confusion for each slide">
+      <SlideAnalyticsBody course={course} session={session} />
+    </CollapsibleSection>
   );
 }
 
@@ -3013,30 +3037,51 @@ function CourseInsightsScreen({ course, session, runAuthed, onBack }) {
               <div className="empty-hint">No sessions recorded yet — this fills in once a student attends a lecture.</div>
             ) : (
               <div className="flag-list">
-                {sessions.map((s) => (
-                  <div className="flag-card" key={s.id}>
-                    <div className="flag-card-meta">
-                      {s.student_name || "Student"} · {new Date(s.ended_at).toLocaleString()} ·{" "}
-                      <span className={s.completed ? "session-badge complete" : "session-badge incomplete"}>
-                        {s.completed ? "Completed" : `Left early (${s.slides_reached}/${s.total_slides} slides)`}
-                      </span>{" "}
-                      · {s.question_count} question{s.question_count === 1 ? "" : "s"}
-                    </div>
-                    {s.summary && <div className="flag-card-answer">{s.summary}</div>}
-                    <button className="nav-btn" onClick={() => setExpandedSessionId((id) => (id === s.id ? null : s.id))}>
-                      {expandedSessionId === s.id ? "Hide transcript" : "View transcript"}
-                    </button>
-                    {expandedSessionId === s.id && (
-                      <div className="session-transcript">
-                        {(s.transcript || []).map((m, i) => (
-                          <div key={i} className="session-transcript-line">
-                            <strong>{m.speaker === "lecturer" ? "Lecturer" : m.speaker}:</strong> {m.text}
+                {sessions.map((s) => {
+                  const open = expandedSessionId === s.id;
+                  const mod = (course.modules || []).find((m) => m.id === s.module_id);
+                  const mins = s.started_at && s.ended_at ? Math.round((new Date(s.ended_at) - new Date(s.started_at)) / 60000) : null;
+                  const pct = s.total_slides > 0 ? Math.min(100, Math.round(((s.slides_reached || 0) / s.total_slides) * 100)) : 0;
+                  return (
+                    <div className={`session-item ${open ? "open" : ""}`} key={s.id}>
+                      {/* Collapsed row: just who, when, and how it went. Everything else waits for a click. */}
+                      <button
+                        type="button"
+                        className="session-row"
+                        aria-expanded={open}
+                        aria-controls={`session-detail-${s.id}`}
+                        onClick={() => setExpandedSessionId((id) => (id === s.id ? null : s.id))}
+                      >
+                        <span className="session-row-name">{s.student_name || "Student"}</span>
+                        <span className="session-row-date">{new Date(s.ended_at).toLocaleString()}</span>
+                        <span className={s.completed ? "session-badge complete" : "session-badge incomplete"}>
+                          {s.completed ? "Completed" : "Left early"}
+                        </span>
+                        <span className="session-row-chevron" aria-hidden="true">{open ? "▾" : "▸"}</span>
+                      </button>
+                      {open && (
+                        <div className="session-detail" id={`session-detail-${s.id}`}>
+                          <div className="session-stats">
+                            {mod && <div><span>Module</span>{mod.unit}</div>}
+                            <div><span>Slides reached</span>{s.slides_reached || 0}/{s.total_slides || 0} ({pct}%)</div>
+                            <div><span>Questions asked</span>{s.question_count || 0}</div>
+                            {mins !== null && <div><span>Time in lecture</span>{mins < 1 ? "under a minute" : `${mins} min`}</div>}
                           </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ))}
+                          {s.summary && <div className="flag-card-answer">{s.summary}</div>}
+                          <div className="session-transcript-title">Transcript</div>
+                          <div className="session-transcript">
+                            {(s.transcript || []).length === 0 && <div className="session-transcript-line">No transcript was recorded for this session.</div>}
+                            {(s.transcript || []).map((m, i) => (
+                              <div key={i} className="session-transcript-line">
+                                <strong>{m.speaker === "lecturer" ? "Lecturer" : m.speaker}:</strong> {m.text}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -4021,8 +4066,68 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
     onLeave();
   };
 
+  // ---- Detours: a temporary board (diagram / mini slide / code) shown while a question is answered. ----
+  // It is an overlay held in its own state: the lecture slide underneath is only hidden, never changed, so
+  // returning is exact. Any failure simply means "no board" and the lecturer answers out loud as before.
+  const detoursOnRef = useRef(detoursEnabled());
+  const [detour, setDetour] = useState(null); // { kind, slide, highlight, id, pinned } | null
+  const detourCtlRef = useRef(null);
+  if (!detourCtlRef.current) detourCtlRef.current = createDetourController({ onChange: setDetour });
+  const detourScrollRef = useRef(0);
+  const questionSeqRef = useRef(0); // lets an older answer notice that a newer question has taken over
+
+  const closeDetour = useCallback((opts) => {
+    const closed = detourCtlRef.current.close();
+    if (closed && !(opts && opts.restoreScroll === false)) {
+      const top = detourScrollRef.current;
+      requestAnimationFrame(() => { if (stageRef.current) stageRef.current.scrollTo({ top }); });
+    }
+  }, []);
+  const backFromDetour = useCallback(() => closeDetour(), [closeDetour]);
+  const closeDetourIf = useCallback((id) => {
+    const cur = detourCtlRef.current.current();
+    if (cur && cur.id === id) closeDetour();
+  }, [closeDetour]);
+  const openDetour = useCallback((board) => {
+    detourScrollRef.current = stageRef.current ? stageRef.current.scrollTop : 0;
+    const id = detourCtlRef.current.open(board);
+    if (stageRef.current) stageRef.current.scrollTo({ top: 0 });
+    return id;
+  }, []);
+  const holdDetour = useCallback((id, ms) => detourCtlRef.current.hold(id, ms), []);
+  const togglePinDetour = useCallback(() => { detourCtlRef.current.togglePin(); }, []);
+  // Any change of slide or view, or leaving the room, ends a detour (no scroll restore: the stage has moved on).
+  useEffect(() => { closeDetour({ restoreScroll: false }); }, [slideIndex, viewMode, closeDetour]);
+  useEffect(() => () => closeDetour({ restoreScroll: false }), [closeDetour]);
+
+  // Turns the model's `visual` into a checked board. A diagram that fails its syntax check gets ONE repair
+  // attempt (capped at 6 seconds); anything still wrong returns null so nothing broken reaches the student.
+  const prepareBoard = useCallback(async (visual, currentSlide) => {
+    const board = buildDetourBoard(visual, currentSlide);
+    if (!board) return null;
+    const first = await checkBoard(board);
+    if (first.ok) return first.board;
+    if (board.kind !== "diagram") return null;
+    try {
+      const fixed = await Promise.race([
+        callAI("You repair Mermaid diagram syntax.", mermaidRepairPrompt(board.slide.diagram.code, first.issues[0]), 700, undefined, "detour_fix"),
+        new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 6000)),
+      ]);
+      const again = buildDetourBoard({ ...visual, mermaid: cleanMermaid(fixed) }, currentSlide);
+      if (!again) return null;
+      const second = await checkBoard(again);
+      return second.ok ? second.board : null;
+    } catch (e) {
+      return null;
+    }
+  }, []);
+
   const handleQuestion = useCallback(
     async (questionText) => {
+      // A new question replaces any board still on screen (kept so a follow-up can refer to it).
+      const boardBefore = detourCtlRef.current.current();
+      const myQuestion = ++questionSeqRef.current;
+      closeDetour();
       if (pausedRef.current) await resumeLecture({ silent: true });
       const tQuestion = performance.now();
       track("question", currentInfo(), { chars: questionText.length, focus: focusIdRef.current });
@@ -4065,22 +4170,34 @@ ${NATURAL_SPEECH_STYLE}`;
       const prompt = `You were covering this slide (teaching notes: ${slide.notes}). Everything that was on screen:\n${slideToPlainContext(slide)}\n\nThe student asks: "${questionText}"\nAnswer so it can be spoken aloud: say maths in words, never read LaTeX or code symbols out letter by letter.`;
       // The lecturer teaches the AI: a matching approved answer is handed to the AI lecturer to base its reply on
       const picked = pickCorrections(questionText, correctionsRef.current);
-      const answerPromise = askLecturer(system + correctionsPromptBlock(picked), prompt, fallbackAnswer, "qa");
+      const detoursOn = detoursOnRef.current;
+      const answerPromise = askLecturer(system + (detoursOn ? VISUAL_PROMPT : "") + correctionsPromptBlock(picked), prompt + (boardBefore ? `\n\n${boardContext(boardBefore)}` : ""), fallbackAnswer, "qa");
 
       await ackPromise;
       if (!mountedRef.current) return;
       const tAckEnd = performance.now();
       const rawAnswer = await answerPromise;
       if (!mountedRef.current) return;
-      const { confidence, answer: safeAnswer } = parseAnswerJSON(rawAnswer, fallbackAnswer);
+      const { confidence, answer: safeAnswer, visual } = detoursOnRef.current ? parseAnswerWithVisual(rawAnswer, fallbackAnswer) : { ...parseAnswerJSON(rawAnswer, fallbackAnswer), visual: null };
 
       addMessage("lecturer", safeAnswer, confidence === "low" ? "answer-flagged" : "answer");
-      track("ai_answer", currentInfo(), { confidence, chars: safeAnswer.length, used_correction: picked.length > 0 });
+      track("ai_answer", currentInfo(), { confidence, chars: safeAnswer.length, used_correction: picked.length > 0, ...(visual ? { visual: visual.kind } : {}) });
       if (confidence === "low") {
         track("flag", currentInfo(), null);
         flagQuestionForLecturer(courseId, moduleId, studentName, questionText, safeAnswer, slide.title);
       }
       setLecturerState2("answering");
+      // Put the board up (if the answer came with one and it passes the checks) before the lecturer starts talking.
+      let boardId = null;
+      let boardKind = null;
+      if (visual) {
+        try {
+          const board = await prepareBoard(visual, slide);
+          if (board && mountedRef.current && questionSeqRef.current === myQuestion) { boardId = openDetour(board); boardKind = board.kind; }
+        } catch (e) {
+          boardId = null;
+        }
+      }
       await speakInterruptible(safeAnswer, {
         onStart: () => {
           const now = performance.now();
@@ -4090,10 +4207,15 @@ ${NATURAL_SPEECH_STYLE}`;
         },
       });
       if (!mountedRef.current) return;
+      if (boardId !== null) {
+        await holdDetour(boardId, holdMs(boardKind));
+        closeDetourIf(boardId);
+        if (!mountedRef.current) return;
+      }
       setLecturerState2("idle");
       setHandRaised(false);
     },
-    [studentName, slide, lecturerIdentity, wordBudget, speakInterruptible, stopSpeaking, askLecturer, courseId, moduleId]
+    [studentName, slide, lecturerIdentity, wordBudget, speakInterruptible, stopSpeaking, askLecturer, courseId, moduleId, closeDetour, closeDetourIf, openDetour, holdDetour, prepareBoard]
   );
 
   const continueTypingCode = useCallback(() => {
@@ -4574,7 +4696,7 @@ ${NATURAL_SPEECH_STYLE}`;
           </div>
 
           <div
-            className={`stage${stageScrolled ? " scrolled" : ""}`}
+            className={`stage${stageScrolled ? " scrolled" : ""}${detour ? " detouring" : ""}`}
             ref={stageRef}
             onScroll={(e) => setStageScrolled(e.currentTarget.scrollTop > 8)}
             onWheel={stopFollowing}
@@ -4584,6 +4706,11 @@ ${NATURAL_SPEECH_STYLE}`;
             role="region"
             aria-label="Lecture slide"
           >
+            {detour && (
+              <SlideBoundary resetKey={`detour:${detour.id}`} onShowSlides={backFromDetour}>
+                <DetourBoard board={detour} onBack={backFromDetour} onTogglePin={togglePinDetour} />
+              </SlideBoundary>
+            )}
             <SlideBoundary resetKey={`${slideIndex}:${view}`} onShowSlides={() => setViewMode("slides")}>
             {view === "slides" ? (
               <SlideView
@@ -5328,6 +5455,32 @@ function GlobalStyles() {
       .session-badge { font-weight: 600; }
       .session-badge.complete { color: #6FBF8A; }
       .session-badge.incomplete { color: #E8A33D; }
+      .collapse-box.nested { margin-top: 12px; border: 1px solid #232A35; border-radius: 10px; background: #14181F; }
+      .collapse-head { width: 100%; display: flex; align-items: center; gap: 10px; padding: 8px 2px; background: none; border: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+      .collapse-box.nested > .collapse-head { padding: 10px 12px; }
+      .collapse-head:hover .collapse-title { color: #fff; }
+      .collapse-head:focus-visible { outline: 2px solid #E8A33D; outline-offset: 2px; border-radius: 6px; }
+      .collapse-title { margin: 0; flex: 0 1 auto; }
+      .collapse-title.nested { font-size: 13px; font-weight: 600; color: #E6E9EE; }
+      .collapse-hint { flex: 1 1 auto; min-width: 0; font-size: 11px; color: #8890A0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .collapse-chevron { color: #8890A0; font-size: 12px; width: 12px; text-align: center; }
+      .collapse-body { padding-top: 8px; }
+      .collapse-box.nested > .collapse-body { padding: 0 12px 12px; }
+      .session-item { background: #14181F; border: 1px solid #232A35; border-radius: 10px; overflow: hidden; }
+      .session-item.open { border-color: #3A4556; }
+      .session-row { width: 100%; display: flex; align-items: center; gap: 12px; padding: 10px 12px; background: none; border: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+      .session-row:hover { background: #1A1F27; }
+      .session-row:focus-visible { outline: 2px solid #E8A33D; outline-offset: -2px; }
+      .session-row-name { font-weight: 600; font-size: 13px; color: #E6E9EE; min-width: 0; flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .session-row-date { font-size: 11px; color: #8890A0; white-space: nowrap; }
+      .session-row .session-badge { font-size: 11px; white-space: nowrap; }
+      .session-row-chevron { color: #8890A0; font-size: 12px; width: 12px; text-align: center; }
+      .session-detail { padding: 4px 12px 12px; display: flex; flex-direction: column; gap: 10px; border-top: 1px solid #232A35; }
+      .session-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin-top: 10px; font-size: 12px; color: #C7CCD4; }
+      .session-stats span { display: block; font-size: 10px; text-transform: uppercase; letter-spacing: .04em; color: #8890A0; margin-bottom: 2px; }
+      .session-transcript-title { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: #8890A0; }
+      .session-detail .session-transcript { margin-top: 0; }
+      @media (max-width: 520px) { .session-row { flex-wrap: wrap; gap: 4px 10px; } .session-row-date { order: 3; flex-basis: 100%; } }
       .session-transcript { margin-top: 8px; padding: 10px; background: #1A1F27; border-radius: 8px; max-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
       .session-transcript-line { font-size: 12px; color: #C7CCD4; line-height: 1.5; }
       @media (max-width: 600px) {

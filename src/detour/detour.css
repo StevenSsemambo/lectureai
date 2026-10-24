@@ -1,0 +1,14 @@
+/* Hide the lecture slide while a detour board is up (it stays mounted, so returning is exact). */
+.stage.detouring > *:not(.detour) { display: none !important; }
+.stage > .detour { margin-block: auto; width: 100%; display: flex; flex-direction: column; gap: 10px; }
+.detour-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.detour-tag { font-size: 12px; font-weight: 600; color: #E8A33D; letter-spacing: .02em; }
+.detour-actions { display: flex; gap: 8px; }
+.detour-btn { background: transparent; color: #C7CCD4; border: 1px solid #3A4556; border-radius: 8px; padding: 6px 12px; font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
+.detour-btn:hover { border-color: #E8A33D; color: #fff; }
+.detour-btn.primary { background: #E8A33D; border-color: #E8A33D; color: #14181F; }
+.detour-btn:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.detour-btn[aria-pressed="true"] { border-color: #E8A33D; color: #E8A33D; }
+.detour-body { min-height: 0; }
+.detour-body .slide { margin: 0; }
+.detour-note { font-size: 11px; color: #8890A0; }
