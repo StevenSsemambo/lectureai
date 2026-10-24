@@ -27,6 +27,7 @@ import VoicePanel from "./voice/VoicePanel.jsx";
 import StylePanel from "./persona/StylePanel.jsx";
 import FeelPanel from "./persona/FeelPanel.jsx";
 import { createConversation, recordExchange, conversationBlock, avoidOpenings } from "./persona/conversation.js";
+import { extractAnswer, createChunker, createSSEParser, trimToSentence, continuesFrom } from "./persona/streaming.js";
 import { milestoneFor, milestoneLine, MAX_MILESTONES_PER_LECTURE } from "./persona/milestones.js";
 import { FEEL_CHOICES, feelThanks } from "./persona/feel.js";
 import { loadPrefs as loadVoicePrefs, savePrefs as saveVoicePrefs, chooseVoice, clampRate } from "./voice/voicePrefs.js";
@@ -183,6 +184,16 @@ function buildRoomData(course, module) {
       lecturerStyleNote: course.lecturerStyleNote || "",
     },
   };
+}
+
+// Streaming answers can be switched off for one browser with localStorage "semai_stream" = "0" (a safety valve).
+function streamingOn() {
+  try {
+    if (typeof ReadableStream === "undefined" || typeof TextDecoder === "undefined") return false;
+    return localStorage.getItem("semai_stream") !== "0";
+  } catch (e) {
+    return true;
+  }
 }
 
 const DEFAULT_MODULE_DRAFT_SETTINGS = { unitTitle: "", durationMinutes: 45, pace: "standard", allowLiveCode: true };
@@ -816,6 +827,11 @@ async function callAIRaw(systemPrompt, userPrompt, maxTokens, model, meta) {
     body: JSON.stringify({ system: systemPrompt, prompt: userPrompt, ...(maxTokens ? { maxTokens } : {}), ...(model ? { model } : {}) }),
   });
   const data = await response.json();
+  return interpretAIJson(response, data, meta);
+}
+
+// The ordinary (non-streamed) reply: pick out the text, or raise the same friendly errors as ever.
+function interpretAIJson(response, data, meta) {
   meta.status = response.status;
   meta.provider = data && data.provider;
   meta.model = data && data.model;
@@ -839,6 +855,64 @@ async function callAIRaw(systemPrompt, userPrompt, maxTokens, model, meta) {
     .join("\n")
     .trim();
   return text || "";
+}
+
+
+// Same request, but the answer arrives in pieces so the lecturer can start speaking before it is finished.
+// onText(textSoFar) is called as it grows. If the server answers normally (not as a stream), this behaves like
+// callAIRaw. Resolves with the full text; a stream that breaks after some text returns what arrived.
+async function callAIStream(systemPrompt, userPrompt, { onText, kind = "qa_stream" } = {}) {
+  if (!AI_PROXY_URL) throw new Error("AI_PROXY_URL isn't configured — deploy the Edge Function and set it near the top of App.jsx.");
+  const t0 = performance.now();
+  const meta = {};
+  let text = "";
+  let firstMs = null;
+  try {
+    const response = await fetch(AI_PROXY_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(SUPABASE_ANON_KEY ? { Authorization: `Bearer ${SUPABASE_ANON_KEY}`, apikey: SUPABASE_ANON_KEY } : {}),
+      },
+      body: JSON.stringify({ system: systemPrompt, prompt: userPrompt, stream: true }),
+    });
+    const ct = (response.headers && typeof response.headers.get === "function" && response.headers.get("content-type")) || "";
+    if (!/text\/event-stream/i.test(ct) || !response.body || typeof response.body.getReader !== "function") {
+      const data = await response.json();
+      meta.status = response.status; meta.provider = data && data.provider; meta.model = data && data.model; meta.serverMs = data && data.serverMs;
+      text = interpretAIJson(response, data, meta);
+      return text;
+    }
+    meta.status = response.status;
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    const parser = createSSEParser();
+    let failed = false;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      for (const ev of parser.push(decoder.decode(value, { stream: true }))) {
+        if (typeof ev.t === "string") {
+          text += ev.t;
+          if (firstMs === null) firstMs = performance.now() - t0;
+          if (onText) { try { onText(text); } catch (e) { /* a display problem must not break the answer */ } }
+        } else if (ev.done) { meta.provider = ev.provider; meta.model = ev.model; meta.serverMs = ev.serverMs; }
+        else if (ev.error) failed = true;
+      }
+    }
+    if (!text.trim()) {
+      const err = new Error(failed ? "The AI service is very busy right now." : "The AI sent an empty answer.");
+      err.busy = true;
+      throw err;
+    }
+    return text.trim();
+  } catch (e) {
+    if (text.trim()) return text.trim(); // some of the answer arrived: use it
+    logTiming(kind, { provider: meta.provider, ok: false, status: meta.status || 0, client_ms: performance.now() - t0 });
+    throw e;
+  } finally {
+    if (text.trim()) logTiming(kind, { provider: meta.provider, model: meta.model, ok: true, status: meta.status, client_ms: performance.now() - t0, first_chunk_ms: firstMs, server_ms: meta.serverMs, chars: text.length });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -3705,6 +3779,17 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
     }
   }, []);
 
+  // Like askLecturer, but the reply streams in (onText gets the text so far). Anything that goes wrong falls back to the
+  // ordinary request, so a streaming problem can never leave the student without an answer.
+  const askLecturerStream = useCallback(async (system, prompt, fallback, kind, onText) => {
+    if (typeof navigator !== "undefined" && navigator.onLine === false) return askLecturer(system, prompt, fallback, kind);
+    try {
+      const text = await callAIStream(system, prompt, { onText, kind: `${kind}_stream` });
+      if (text) { setAiNotice(""); return text; }
+    } catch (e) { /* fall through to the ordinary request */ }
+    return askLecturer(system, prompt, fallback, kind);
+  }, [askLecturer]);
+
   const generateExplanation = useCallback(
     async (targetSlide, plan, slideIdx = 0, meta = {}) => {
       // what to say if the AI can't be reached: the narration it gave before, else the slide's own content
@@ -4204,42 +4289,96 @@ ${NATURAL_SPEECH_STYLE}`;
       const picked = pickCorrections(questionText, correctionsRef.current);
       const detoursOn = detoursOnRef.current;
       const convoBlock = conversationBlock(conversationRef.current, { slideTitle: slide.title });
-      const answerPromise = askLecturer(system + (detoursOn ? VISUAL_PROMPT : "") + correctionsPromptBlock(picked) + avoidOpenings(conversationRef.current), (convoBlock ? `${convoBlock}\n\n` : "") + prompt + (boardBefore ? `\n\n${boardContext(boardBefore)}` : ""), fallbackAnswer, "qa");
+      const qSystem = system + (detoursOn ? VISUAL_PROMPT : "") + correctionsPromptBlock(picked) + avoidOpenings(conversationRef.current);
+      const qPrompt = (convoBlock ? `${convoBlock}\n\n` : "") + prompt + (boardBefore ? `\n\n${boardContext(boardBefore)}` : "");
+      // Streaming: speak each sentence as soon as it has arrived instead of waiting for the whole answer.
+      const streamOn = streamingOn();
+      const useEleven = settings.voiceProvider === "elevenlabs" && !!settings.elevenLabsApiKey;
+      const st = streamOn ? { chunker: createChunker({ mode: useEleven ? "two" : "sentences" }), queue: [], final: false, wake: null, spoke: false, said: "", seen: "" } : null;
+      const onText = st ? (txt) => {
+        const a = extractAnswer(txt);
+        if (a && a.text) {
+          st.seen = a.text;
+          const out = st.chunker.push(a.text, false);
+          if (out.length) { st.said += (st.said ? " " : "") + out.join(" "); st.queue.push(...out); if (st.wake) st.wake(); }
+        }
+      } : null;
+      const answerPromise = st
+        ? askLecturerStream(qSystem, qPrompt, fallbackAnswer, "qa", onText)
+        : askLecturer(qSystem, qPrompt, fallbackAnswer, "qa");
 
       await ackPromise;
       if (!mountedRef.current) return;
       const tAckEnd = performance.now();
+      const onVoiceStart = () => {
+        const now = performance.now();
+        // dead air = silence between the end of "Yes, Sam?" and the start of the answer; total = question to answer voice
+        logTiming("qa_dead_air", { client_ms: Math.max(0, now - tAckEnd), streamed: !!st });
+        logTiming("qa_to_answer_voice", { client_ms: now - tQuestion, streamed: !!st });
+      };
+      // The speaker starts now and talks whenever a sentence is ready; it ends when the answer is complete and spoken.
+      const speaker = st ? (async () => {
+        let first = true;
+        for (;;) {
+          if (!mountedRef.current || questionSeqRef.current !== myQuestion) return;
+          if (!st.queue.length) {
+            if (st.final) return;
+            await new Promise((r) => { st.wake = r; setTimeout(r, 100); });
+            st.wake = null;
+            continue;
+          }
+          if (!first && interruptedRef.current) return; // the student cut in between two sentences
+          const piece = st.queue.shift();
+          const ok = await speakInterruptible(piece, first ? { onStart: onVoiceStart } : {});
+          first = false;
+          st.spoke = true;
+          if (!ok) return;
+        }
+      })() : null;
       const rawAnswer = await answerPromise;
       if (!mountedRef.current) return;
-      const { confidence, answer: safeAnswer, visual } = detoursOnRef.current ? parseAnswerWithVisual(rawAnswer, fallbackAnswer) : { ...parseAnswerJSON(rawAnswer, fallbackAnswer), visual: null };
+      const parsedAnswer = detoursOnRef.current ? parseAnswerWithVisual(rawAnswer, fallbackAnswer) : { ...parseAnswerJSON(rawAnswer, fallbackAnswer), visual: null };
+      const { confidence, visual } = parsedAnswer;
+      let safeAnswer = parsedAnswer.answer;
+      // A stream that broke part-way leaves unfinished JSON. If we already started speaking, finish on a complete sentence.
+      if (st && safeAnswer === fallbackAnswer && st.seen) {
+        const cut = trimToSentence(st.seen);
+        if (cut) safeAnswer = cut;
+      }
+      const streamedAny = !!st && (st.spoke || st.queue.length > 0 || st.chunker.spoken > 0);
+      if (st) {
+        if (streamedAny && continuesFrom(safeAnswer, st.said)) st.queue.push(...st.chunker.push(safeAnswer, true)); // whatever has not been said yet
+        st.final = true;
+        if (st.wake) st.wake();
+      }
 
       addMessage("lecturer", safeAnswer, confidence === "low" ? "answer-flagged" : "answer");
       if (safeAnswer !== fallbackAnswer) recordExchange(conversationRef.current, { question: questionText, answer: safeAnswer, slideTitle: slide.title });
-      track("ai_answer", currentInfo(), { confidence, chars: safeAnswer.length, used_correction: picked.length > 0, ...(visual ? { visual: visual.kind } : {}) });
+      track("ai_answer", currentInfo(), { confidence, chars: safeAnswer.length, used_correction: picked.length > 0, streamed: streamedAny, ...(visual ? { visual: visual.kind } : {}) });
       if (confidence === "low") {
         track("flag", currentInfo(), null);
         flagQuestionForLecturer(courseId, moduleId, studentName, questionText, safeAnswer, slide.title);
       }
       setLecturerState2("answering");
-      // Put the board up (if the answer came with one and it passes the checks) before the lecturer starts talking.
+      // The board goes up (if the answer came with one and it passes the checks). When the answer was streamed this
+      // happens while the lecturer is already talking; otherwise it goes up before the lecturer starts.
       let boardId = null;
       let boardKind = null;
-      if (visual) {
+      const prepareAndOpenBoard = async () => {
         try {
           const board = await prepareBoard(visual, slide);
           if (board && mountedRef.current && questionSeqRef.current === myQuestion) { boardId = openDetour(board); boardKind = board.kind; }
         } catch (e) {
           boardId = null;
         }
+      };
+      if (streamedAny) {
+        await Promise.all([speaker, visual ? prepareAndOpenBoard() : null]);
+      } else {
+        if (visual) await prepareAndOpenBoard();
+        if (speaker) await speaker; // ends at once: nothing was queued
+        await speakInterruptible(safeAnswer, { onStart: onVoiceStart });
       }
-      await speakInterruptible(safeAnswer, {
-        onStart: () => {
-          const now = performance.now();
-          // dead air = silence between the end of "Yes, Sam?" and the start of the answer; total = question to answer voice
-          logTiming("qa_dead_air", { client_ms: Math.max(0, now - tAckEnd) });
-          logTiming("qa_to_answer_voice", { client_ms: now - tQuestion });
-        },
-      });
       if (!mountedRef.current) return;
       if (boardId !== null) {
         await holdDetour(boardId, holdMs(boardKind));
@@ -4249,7 +4388,7 @@ ${NATURAL_SPEECH_STYLE}`;
       setLecturerState2("idle");
       setHandRaised(false);
     },
-    [studentName, slide, lecturerIdentity, wordBudget, speakInterruptible, stopSpeaking, askLecturer, courseId, moduleId, closeDetour, closeDetourIf, openDetour, holdDetour, prepareBoard]
+    [studentName, slide, lecturerIdentity, wordBudget, speakInterruptible, stopSpeaking, askLecturer, askLecturerStream, settings.voiceProvider, settings.elevenLabsApiKey, courseId, moduleId, closeDetour, closeDetourIf, openDetour, holdDetour, prepareBoard]
   );
 
   const continueTypingCode = useCallback(() => {

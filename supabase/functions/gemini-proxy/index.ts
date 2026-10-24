@@ -11,6 +11,10 @@
 // client-side callAI() in the app has one shape to parse regardless of
 // which model is actually answering.
 //
+// v10: {"stream": true} answers as a server-sent-event stream (data: {"t": "text piece"} ... data: {"done": true, ...})
+// so the app can start speaking before the whole answer exists. Errors BEFORE the stream starts use the same JSON
+// replies as before, and callers that do not ask for a stream are unaffected.
+//
 // v9: responses carry {provider, model, serverMs} for timing analysis, and a signed-in
 // user can send {"probe": true} to run a tiny live test of Gemini AND Groq (health check).
 //
@@ -61,6 +65,60 @@ function jsonResponse(body: unknown, status = 200) {
     status,
     headers: { ...corsHeaders, "Content-Type": "application/json" },
   });
+}
+
+// ---- streaming replies (server-sent events) ---------------------------------------------
+const sseHeaders = { ...corsHeaders, "Content-Type": "text/event-stream", "Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no" };
+
+// A whole answer delivered as a (one-piece) stream, used when Groq answered instead of Gemini.
+function singleSSE(text: string, meta: Record<string, unknown>) {
+  const enc = new TextEncoder();
+  const out = `data: ${JSON.stringify({ t: text })}\n\ndata: ${JSON.stringify({ done: true, ...meta })}\n\n`;
+  return new Response(enc.encode(out), { status: 200, headers: sseHeaders });
+}
+
+// Re-streams Gemini's event stream as {t: "text"} pieces.
+function streamFromGemini(res: Response, meta: Record<string, unknown>, t0: number) {
+  const enc = new TextEncoder();
+  const dec = new TextDecoder();
+  const body = new ReadableStream({
+    async start(controller) {
+      const send = (o: unknown) => controller.enqueue(enc.encode(`data: ${JSON.stringify(o)}\n\n`));
+      let any = false;
+      const handle = (raw: string) => {
+        const data = raw.split(/\r?\n/).filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim()).join("");
+        if (!data) return;
+        try {
+          const j = JSON.parse(data);
+          const t = j?.candidates?.[0]?.content?.parts?.map((p: any) => p.text || "").join("") || "";
+          if (t) { any = true; send({ t }); }
+        } catch (_e) { /* skip a damaged event */ }
+      };
+      try {
+        const reader = res.body!.getReader();
+        let buf = "";
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          let idx: number;
+          while ((idx = buf.search(/\r?\n\r?\n/)) !== -1) {
+            handle(buf.slice(0, idx));
+            buf = buf.slice(idx).replace(/^\r?\n\r?\n/, "");
+          }
+        }
+        if (buf.trim()) handle(buf);
+        if (!any) send({ error: "empty" });
+        else send({ done: true, ...meta, serverMs: Date.now() - t0 });
+      } catch (e) {
+        console.error(`stream failure: ${String(e).slice(0, 120)}`);
+        send({ error: "stream" });
+      } finally {
+        controller.close();
+      }
+    },
+  });
+  return new Response(body, { status: 200, headers: sseHeaders });
 }
 
 // ---- best-effort in-memory rate limiter --------------------------------------
@@ -192,6 +250,7 @@ Deno.serve(async (req) => {
       });
     }
 
+    const wantStream = (body as { stream?: unknown }).stream === true;
     const { system, prompt, maxTokens, model } = body as {
       system?: unknown; prompt?: unknown; maxTokens?: unknown; model?: unknown;
     };
@@ -243,7 +302,7 @@ Deno.serve(async (req) => {
       for (let attempt = 0; attempt < attempts; attempt++) {
         if (attempt) await new Promise((resolve) => setTimeout(resolve, attempt * pauseMs));
         try {
-          r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${id}:generateContent`, {
+          r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${id}:${wantStream ? "streamGenerateContent?alt=sse" : "generateContent"}`, {
             method: "POST",
             headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY },
             body: bodyJson,
@@ -276,6 +335,7 @@ Deno.serve(async (req) => {
       const g = await callGroq(systemText, prompt, outputTokens);
       if (g.ok) {
         console.error(`Fell back to Groq (${GROQ_MODEL}) after Gemini ${res ? res.status : "unreachable"}`);
+        if (wantStream) return singleSSE(g.text || "", { provider: "groq", model: GROQ_MODEL, serverMs: Date.now() - t0 });
         return jsonResponse({ content: [{ type: "text", text: g.text }], provider: "groq", model: GROQ_MODEL, serverMs: Date.now() - t0 }, 200);
       }
       if (g.status === 429 && (!res || res.status === 429)) return jsonResponse({ content: [], rateLimited: true }, 429);
@@ -290,6 +350,8 @@ Deno.serve(async (req) => {
       console.error(`Gemini error ${res.status}: ${errText.slice(0, 500)}`);
       return jsonResponse({ content: [], error: `AI provider error (${res.status})` }, res.status);
     }
+
+    if (wantStream && res.body) return streamFromGemini(res, { provider: "gemini", model: usedModel }, t0);
 
     const data = await res.json();
     const text = data?.candidates?.[0]?.content?.parts?.map((p: any) => p.text || "").join("") || "";
