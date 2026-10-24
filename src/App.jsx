@@ -25,6 +25,9 @@ import RosterPanel from "./learning/RosterPanel.jsx";
 import TeachingEffectPanel from "./learning/TeachingEffectPanel.jsx";
 import VoicePanel from "./voice/VoicePanel.jsx";
 import StylePanel from "./persona/StylePanel.jsx";
+import FeelPanel from "./persona/FeelPanel.jsx";
+import { milestoneFor, milestoneLine, MAX_MILESTONES_PER_LECTURE } from "./persona/milestones.js";
+import { FEEL_CHOICES, feelThanks } from "./persona/feel.js";
 import { loadPrefs as loadVoicePrefs, savePrefs as saveVoicePrefs, chooseVoice, clampRate } from "./voice/voicePrefs.js";
 import { createSessionManager, SessionExpiredError } from "./authSession.js";
 import { offlineStore } from "./offline/store.js";
@@ -3030,6 +3033,7 @@ function CourseInsightsScreen({ course, session, runAuthed, onBack }) {
           <SlideAnalyticsPanel course={course} session={session} />
           <RosterPanel course={course} loadRows={loadStudentRows} />
           <TeachingEffectPanel loadRows={loadTeachingEvents} />
+          <FeelPanel loadRows={loadTeachingEvents} />
 
           <div className="flag-section">
             <div className="flag-section-title">Sessions</div>
@@ -3446,6 +3450,8 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
   const careResolveRef = useRef(null);
   const signalLogRef = useRef([]); // this lecture's "I'm lost" etc. taps: [{slide, value}]
   const lastCareOfferRef = useRef(0);
+  const milestonesRef = useRef({ shown: new Set(), count: 0 });
+  const [feelChoice, setFeelChoice] = useState(null); // the student's one tap at the end of the lecture
   const careOffersMadeRef = useRef(0);
   const lastFeedbackKeyRef = useRef(null);
   const lastAckKeyRef = useRef(null);
@@ -3467,6 +3473,19 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
     });
     lastFeedbackKeyRef.current = r.key;
     return r.text;
+  };
+  // A moment worth marking, from the real record only (null if there isn't one).
+  const milestoneFor_ = (check, outcome) => {
+    const m = milestonesRef.current;
+    if (!outcome.correct || !check.concept || m.count >= MAX_MILESTONES_PER_LECTURE) return null;
+    const key = String(check.concept).toLowerCase();
+    if (m.shown.has(key)) return null;
+    const ev = [...historyRef.current, ...sessionEvidenceRef.current];
+    const pick = (list) => estimateWithClaims(list, claimsRef.current).find((x) => conceptsMatch(x.concept, check.concept)) || null;
+    const hit = milestoneFor({ before: pick(ev.slice(0, -1)), after: pick(ev), correct: true });
+    if (!hit) return null;
+    m.shown.add(key); m.count += 1;
+    return milestoneLine(hit.kind, check.concept, feedbackCharacter(stylePrefsRef.current, personaId));
   };
 
   // Code reveals fresh on a new slide: full code if it's already been taught,
@@ -3914,6 +3933,16 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
           if (stale()) return;
           if (!fbDone) await waitForIdle();
           setLecturerState2("idle");
+          const mile = adaptOnRef.current ? milestoneFor_(check, outcome) : null;
+          if (mile && !stale()) {
+            await sleep(400);
+            setLecturerState2("explaining");
+            addMessage("lecturer", mile, "explain");
+            const mDone = await speakInterruptible(mile);
+            if (stale()) return;
+            if (!mDone) await waitForIdle();
+            setLecturerState2("idle");
+          }
           await sleep(700);
           // missed it: is the real gap an earlier idea? (one short question, only if personalisation is on)
           if (!outcome.correct && adaptOnRef.current && diagnosticRef.current) {
@@ -4819,6 +4848,20 @@ ${NATURAL_SPEECH_STYLE}`;
                 {notesStatus === "generating" ? <Loader2 className="spin" size={14} /> : <FileDown size={14} />}
                 {notesStatus === "generating" ? "Generating…" : "Download lecture notes (PDF)"}
               </button>
+              {role !== "lecturer" && (
+                <div className="signal-row feel-row" role="group" aria-label="How did this lecture feel?" style={{ width: "100%" }}>
+                  {feelChoice ? (
+                    <span className="signal-label" role="status">{feelThanks(feelChoice)}</span>
+                  ) : (
+                    <>
+                      <span className="signal-label">How did this lecture feel?</span>
+                      {FEEL_CHOICES.map((c) => (
+                        <button key={c.id} className="signal-btn" onClick={() => { setFeelChoice(c.id); track("signal", currentInfo(), { value: "lecture_feel", choice: c.id }); }}>{c.label}</button>
+                      ))}
+                    </>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>
