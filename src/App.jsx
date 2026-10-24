@@ -26,6 +26,7 @@ import TeachingEffectPanel from "./learning/TeachingEffectPanel.jsx";
 import VoicePanel from "./voice/VoicePanel.jsx";
 import StylePanel from "./persona/StylePanel.jsx";
 import FeelPanel from "./persona/FeelPanel.jsx";
+import { createConversation, recordExchange, conversationBlock, avoidOpenings } from "./persona/conversation.js";
 import { milestoneFor, milestoneLine, MAX_MILESTONES_PER_LECTURE } from "./persona/milestones.js";
 import { FEEL_CHOICES, feelThanks } from "./persona/feel.js";
 import { loadPrefs as loadVoicePrefs, savePrefs as saveVoicePrefs, chooseVoice, clampRate } from "./voice/voicePrefs.js";
@@ -3450,6 +3451,8 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
   const careResolveRef = useRef(null);
   const signalLogRef = useRef([]); // this lecture's "I'm lost" etc. taps: [{slide, value}]
   const lastCareOfferRef = useRef(0);
+  const conversationRef = useRef(null); // this lecture's questions and answers, for follow-ups (in memory only)
+  if (!conversationRef.current) conversationRef.current = createConversation();
   const milestonesRef = useRef({ shown: new Set(), count: 0 });
   const [feelChoice, setFeelChoice] = useState(null); // the student's one tap at the end of the lecture
   const careOffersMadeRef = useRef(0);
@@ -4200,7 +4203,8 @@ ${NATURAL_SPEECH_STYLE}`;
       // The lecturer teaches the AI: a matching approved answer is handed to the AI lecturer to base its reply on
       const picked = pickCorrections(questionText, correctionsRef.current);
       const detoursOn = detoursOnRef.current;
-      const answerPromise = askLecturer(system + (detoursOn ? VISUAL_PROMPT : "") + correctionsPromptBlock(picked), prompt + (boardBefore ? `\n\n${boardContext(boardBefore)}` : ""), fallbackAnswer, "qa");
+      const convoBlock = conversationBlock(conversationRef.current, { slideTitle: slide.title });
+      const answerPromise = askLecturer(system + (detoursOn ? VISUAL_PROMPT : "") + correctionsPromptBlock(picked) + avoidOpenings(conversationRef.current), (convoBlock ? `${convoBlock}\n\n` : "") + prompt + (boardBefore ? `\n\n${boardContext(boardBefore)}` : ""), fallbackAnswer, "qa");
 
       await ackPromise;
       if (!mountedRef.current) return;
@@ -4210,6 +4214,7 @@ ${NATURAL_SPEECH_STYLE}`;
       const { confidence, answer: safeAnswer, visual } = detoursOnRef.current ? parseAnswerWithVisual(rawAnswer, fallbackAnswer) : { ...parseAnswerJSON(rawAnswer, fallbackAnswer), visual: null };
 
       addMessage("lecturer", safeAnswer, confidence === "low" ? "answer-flagged" : "answer");
+      if (safeAnswer !== fallbackAnswer) recordExchange(conversationRef.current, { question: questionText, answer: safeAnswer, slideTitle: slide.title });
       track("ai_answer", currentInfo(), { confidence, chars: safeAnswer.length, used_correction: picked.length > 0, ...(visual ? { visual: visual.kind } : {}) });
       if (confidence === "low") {
         track("flag", currentInfo(), null);
