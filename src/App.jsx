@@ -55,12 +55,13 @@ import { VISUAL_PROMPT, parseAnswerWithVisual, buildDetourBoard, checkBoard, cle
 import { PERSONAS, PERSONA_IDS, MAX_NAME, MAX_NOTE, DEFAULT_PERSONA, resolvePersona, lecturerIdentityFor, introPreview, introGuidance, sanitizeName, sanitizeStyleNote } from "./persona/persona.js";
 import { quizFeedback, questionAck } from "./persona/feedback.js";
 import { careDue, careLine, careReply, CARE_CHOICES } from "./persona/care.js";
+import { safeLocalStorage } from "./safeStorage.js";
 import { loadPrefs, savePrefs, feedbackCharacter, styleLine, FEEDBACK_STYLES } from "./persona/studentPrefs.js";
 import { buildWelcomeFacts, welcomeGuidance } from "./persona/welcome.js";
 import { newCheckState, chooseOption as chooseCheckState, finishCheck as finishCheckState, skipCheck as skipCheckState } from "./slideKit/checkFlow.js";
 import {
   Pause, Play, Hand, MessageSquare, PhoneOff, Code2, PresentationIcon, Send,
-  ChevronRight, ChevronLeft, Video, VideoOff, Loader2, Volume2, Upload,
+  ChevronRight, ChevronLeft, ChevronDown, Video, VideoOff, Loader2, Volume2, Upload,
   Sparkles, Trash2, ArrowRight, GraduationCap, Users, Settings2, RotateCcw,
   AlertTriangle, Clock, FileDown, Maximize2, Minimize2, Flag, CheckCircle2, Download, MoreHorizontal, X, } from "lucide-react";
 
@@ -2751,6 +2752,19 @@ function LecturerDashboard({ courses, dbStatus, lecturerEmail, account, onAccoun
   const [confirm, setConfirm] = useState(null); // { kind: "module" | "course", id }
   const [typedCode, setTypedCode] = useState("");
   const [busyId, setBusyId] = useState(null);
+  // Which courses are expanded. Remembered on this device; a course with no saved choice is
+  // expanded only when it is the lecturer's single course, so a long list starts tidy.
+  const [openMap, setOpenMap] = useState(() => {
+    try { const ls = safeLocalStorage(); return (ls && JSON.parse(ls.getItem("semai_dash_open") || "{}")) || {}; } catch (e) { return {}; }
+  });
+  const isOpen = (c) => (c.id in openMap ? !!openMap[c.id] : courses.length <= 1);
+  const saveOpen = (next) => {
+    setOpenMap(next);
+    try { const ls = safeLocalStorage(); if (ls) ls.setItem("semai_dash_open", JSON.stringify(next)); } catch (e) { /* storage blocked: still works for this visit */ }
+  };
+  const toggleCourse = (c) => saveOpen({ ...openMap, [c.id]: !isOpen(c) });
+  const setAllOpen = (open) => saveOpen(Object.fromEntries(courses.map((c) => [c.id, open])));
+  const allOpen = courses.length > 0 && courses.every(isOpen);
   const runDelete = async (kind, course, module_) => {
     setBusyId(kind === "course" ? course.id : module_.id);
     try { await (kind === "course" ? onDeleteCourse(course) : onDeleteModule(course, module_)); } finally { setBusyId(null); setConfirm(null); setTypedCode(""); }
@@ -2784,19 +2798,34 @@ function LecturerDashboard({ courses, dbStatus, lecturerEmail, account, onAccoun
       )}
 
       <div className="dash-toolbar">
+        {courses.length > 1 && (
+          <button className="nav-btn" onClick={() => setAllOpen(!allOpen)}>{allOpen ? "Collapse all" : "Expand all"}</button>
+        )}
         <button className="explain-btn" onClick={onNewCourse}><Sparkles size={14} /> New course</button>
       </div>
 
       {courses.length === 0 && <div className="empty-hint">No courses yet — create one to get started.</div>}
 
       <div className="course-list">
-        {courses.map((course) => (
-          <div className="course-card" key={course.id}>
+        {courses.map((course) => {
+          const open = isOpen(course);
+          return (
+          <div className={`course-card ${open ? "" : "collapsed"}`} key={course.id}>
             <div className="course-card-head">
-              <div>
-                <strong>{course.code}</strong> — {course.title}
-                {course.institution && <span className="setup-optional"> · {course.institution}</span>}
-              </div>
+              <button
+                type="button"
+                className="course-toggle"
+                aria-expanded={open}
+                aria-controls={`course-body-${course.id}`}
+                onClick={() => toggleCourse(course)}
+              >
+                <span className="course-toggle-chevron" aria-hidden="true">{open ? <ChevronDown size={16} /> : <ChevronRight size={16} />}</span>
+                <span className="course-toggle-text">
+                  <strong>{course.code}</strong> — {course.title}
+                  {course.institution && <span className="setup-optional"> · {course.institution}</span>}
+                  <span className="course-count">{course.modules.length} module{course.modules.length === 1 ? "" : "s"}</span>
+                </span>
+              </button>
               <div style={{ display: "flex", gap: 6 }}>
                 <button className="icon-btn" onClick={() => onViewInsights(course)} title="Course insights — sessions & flagged questions" aria-label={`View insights for ${course.code}`}>
                   <Flag size={14} />
@@ -2823,6 +2852,8 @@ function LecturerDashboard({ courses, dbStatus, lecturerEmail, account, onAccoun
               </div>
             )}
 
+            {open && (
+            <div id={`course-body-${course.id}`}>
             {course.modules.length === 0 ? (
               <div className="empty-hint">No modules yet — add the first one below.</div>
             ) : (
@@ -2857,8 +2888,11 @@ function LecturerDashboard({ courses, dbStatus, lecturerEmail, account, onAccoun
             )}
 
             <button className="skip-link" style={{ marginTop: 4 }} onClick={() => onAddModule(course)}>+ Add another module</button>
+            </div>
+            )}
           </div>
-        ))}
+          );
+        })}
       </div>
 
       {account && <AIHealthPanel session={account} />}
@@ -5784,7 +5818,14 @@ function GlobalStyles() {
       .db-status.ok { color: #6FBF8A; background: rgba(111,191,138,0.1); border: 1px solid rgba(111,191,138,0.25); }
       .db-status.warn { color: #E8A33D; background: rgba(232,163,61,0.1); border: 1px solid rgba(232,163,61,0.25); }
       .db-status.loading { color: #8B93A1; background: #1A1F27; border: 1px solid #232A34; }
-      .dash-toolbar { display: flex; justify-content: flex-end; margin-bottom: 18px; }
+      .dash-toolbar { display: flex; justify-content: flex-end; gap: 10px; flex-wrap: wrap; margin-bottom: 18px; }
+      .course-toggle { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; background: none; border: 0; padding: 4px 2px; color: inherit; font: inherit; text-align: left; cursor: pointer; border-radius: 8px; }
+      .course-toggle:hover { background: #232A34; }
+      .course-toggle:focus-visible { outline: 2px solid #E8A33D; outline-offset: 2px; }
+      .course-toggle-chevron { display: inline-flex; color: #8B93A1; flex: none; }
+      .course-toggle-text { min-width: 0; overflow-wrap: anywhere; }
+      .course-count { margin-left: 8px; font-size: 12px; color: #8B93A1; white-space: nowrap; }
+      .course-card.collapsed .course-card-head { margin-bottom: 0; }
       .course-list { display: flex; flex-direction: column; gap: 14px; }
       .course-card { background: #1E2530; border: 1px solid #232A34; border-radius: 12px; padding: 16px; }
       .course-card-head { display: flex; justify-content: space-between; align-items: center; font-size: 14px; margin-bottom: 10px; }
