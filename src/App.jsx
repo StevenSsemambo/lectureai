@@ -715,6 +715,12 @@ async function fetchSessions(courseId, accessToken) {
   return supabaseRequest(`/sessions?course_id=eq.${encodeURIComponent(courseId)}&select=*&order=ended_at.desc`, {}, accessToken);
 }
 
+// Hides (or restores) sessions on the lecturer's dashboard only. Server-side function checks course
+// ownership; students keep their own history and learning analytics are untouched.
+async function setSessionsCleared(courseId, ids, clear, accessToken) {
+  return supabaseRequest("/rpc/lecturer_clear_sessions", { method: "POST", body: JSON.stringify({ p_course_id: courseId, p_session_ids: ids, p_clear: clear }) }, accessToken);
+}
+
 // A signed-in student's own session history — embeds the course's code/
 // title/institution via PostgREST's foreign-table syntax so the history
 // view doesn't need a second round trip per session to make sense of it.
@@ -3030,6 +3036,10 @@ function CourseInsightsScreen({ course, session, runAuthed, onBack }) {
   const [flags, setFlags] = useState(null);
   const [error, setError] = useState("");
   const [expandedSessionId, setExpandedSessionId] = useState(null);
+  const [clearBusy, setClearBusy] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(null); // "all" | "completed" | null
+  const [lastCleared, setLastCleared] = useState(null); // ids, for Undo
+  const [showCleared, setShowCleared] = useState(false);
 
   const load = useCallback(() => {
     setSessions(null);
@@ -3075,10 +3085,34 @@ function CourseInsightsScreen({ course, session, runAuthed, onBack }) {
   const unresolvedFlags = (flags || []).filter((f) => !f.resolved);
   const resolvedFlags = (flags || []).filter((f) => f.resolved);
 
-  const totalSessions = (sessions || []).length;
-  const completedSessions = (sessions || []).filter((s) => s.completed).length;
+  // Cleared sessions are hidden from this dashboard (and its numbers) but kept, so they can be restored.
+  const allSessions = sessions || [];
+  const clearedSessions = allSessions.filter((s) => s.lecturer_cleared_at);
+  const visibleSessions = allSessions.filter((s) => !s.lecturer_cleared_at);
+  const listed = showCleared ? clearedSessions : visibleSessions;
+  const totalSessions = visibleSessions.length;
+  const completedSessions = visibleSessions.filter((s) => s.completed).length;
   const completionRate = totalSessions > 0 ? Math.round((completedSessions / totalSessions) * 100) : null;
-  const avgQuestions = totalSessions > 0 ? (sessions.reduce((sum, s) => sum + (s.question_count || 0), 0) / totalSessions).toFixed(1) : null;
+  const avgQuestions = totalSessions > 0 ? (visibleSessions.reduce((sum, s) => sum + (s.question_count || 0), 0) / totalSessions).toFixed(1) : null;
+
+  const applyCleared = async (ids, clear) => {
+    if (!ids.length || clearBusy) return;
+    setClearBusy(true);
+    setError("");
+    try {
+      await authed((t) => setSessionsCleared(course.id, ids, clear, t));
+      const idSet = new Set(ids);
+      const stamp = clear ? new Date().toISOString() : null;
+      setSessions((list) => (list || []).map((x) => (idSet.has(x.id) ? { ...x, lecturer_cleared_at: stamp } : x)));
+      setLastCleared(clear ? ids : null);
+      setConfirmClear(null);
+      if (!clear && clearedSessions.length - ids.length <= 0) setShowCleared(false);
+    } catch (e) {
+      setError(e.message || "Couldn't update the sessions — please try again.");
+    } finally {
+      setClearBusy(false);
+    }
+  };
 
   return (
     <div className="setup-screen">
@@ -3110,18 +3144,65 @@ function CourseInsightsScreen({ course, session, runAuthed, onBack }) {
           <FeelPanel loadRows={loadTeachingEvents} />
 
           <div className="flag-section">
-            <div className="flag-section-title">Sessions</div>
-            {totalSessions === 0 ? (
-              <div className="empty-hint">No sessions recorded yet — this fills in once a student attends a lecture.</div>
+            <div className="flag-section-title">{showCleared ? `Cleared sessions (${clearedSessions.length})` : `Sessions (${totalSessions})`}</div>
+            {lastCleared && !showCleared && (
+              <div className="clear-undo" role="status">
+                Cleared {lastCleared.length} session{lastCleared.length === 1 ? "" : "s"} from this dashboard.
+                <button className="skip-link" disabled={clearBusy} onClick={() => applyCleared(lastCleared, false)}>Undo</button>
+              </div>
+            )}
+            {!showCleared && totalSessions > 0 && (
+              <div className="clear-bar">
+                {confirmClear ? (
+                  <>
+                    <span>
+                      {confirmClear === "all" ? `Clear all ${totalSessions} sessions` : `Clear ${completedSessions} completed session${completedSessions === 1 ? "" : "s"}`} from this dashboard? Students keep their own history, and you can restore them later.
+                    </span>
+                    <button className="nav-btn" disabled={clearBusy} onClick={() => applyCleared((confirmClear === "all" ? visibleSessions : visibleSessions.filter((x) => x.completed)).map((x) => x.id), true)}>
+                      {clearBusy ? <Loader2 className="spin" size={13} /> : <Trash2 size={13} />} Yes, clear
+                    </button>
+                    <button className="skip-link" disabled={clearBusy} onClick={() => setConfirmClear(null)}>Cancel</button>
+                  </>
+                ) : (
+                  <>
+                    <button className="nav-btn" onClick={() => setConfirmClear("all")}><Trash2 size={13} /> Clear all</button>
+                    {completedSessions > 0 && completedSessions < totalSessions && (
+                      <button className="nav-btn" onClick={() => setConfirmClear("completed")}>Clear completed only ({completedSessions})</button>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+            {showCleared && clearedSessions.length > 0 && (
+              <div className="clear-bar">
+                <button className="nav-btn" disabled={clearBusy} onClick={() => applyCleared(clearedSessions.map((x) => x.id), false)}>
+                  {clearBusy ? <Loader2 className="spin" size={13} /> : <RotateCcw size={13} />} Restore all
+                </button>
+              </div>
+            )}
+            {listed.length === 0 ? (
+              <div className="empty-hint">
+                {showCleared ? "No cleared sessions." : clearedSessions.length > 0 ? "All sessions are cleared. New ones will appear here as students finish lectures." : "No sessions recorded yet — this fills in once a student attends a lecture."}
+              </div>
             ) : (
               <div className="flag-list">
-                {sessions.map((s) => {
+                {listed.map((s) => {
                   const open = expandedSessionId === s.id;
                   const mod = (course.modules || []).find((m) => m.id === s.module_id);
                   const mins = s.started_at && s.ended_at ? Math.round((new Date(s.ended_at) - new Date(s.started_at)) / 60000) : null;
                   const pct = s.total_slides > 0 ? Math.min(100, Math.round(((s.slides_reached || 0) / s.total_slides) * 100)) : 0;
                   return (
                     <div className={`session-item ${open ? "open" : ""}`} key={s.id}>
+                      <button
+                        type="button"
+                        className="session-clear-btn"
+                        disabled={clearBusy}
+                        title={s.lecturer_cleared_at ? "Restore this session" : "Clear this session from the dashboard"}
+                        aria-label={s.lecturer_cleared_at ? "Restore this session" : "Clear this session from the dashboard"}
+                        onClick={() => applyCleared([s.id], !s.lecturer_cleared_at)}
+                      >
+                        {s.lecturer_cleared_at ? <RotateCcw size={13} /> : <Trash2 size={13} />}
+                      </button>
                       {/* Collapsed row: just who, when, and how it went. Everything else waits for a click. */}
                       <button
                         type="button"
@@ -3163,6 +3244,14 @@ function CourseInsightsScreen({ course, session, runAuthed, onBack }) {
               </div>
             )}
           </div>
+
+          {clearedSessions.length > 0 && (
+            <div className="clear-toggle">
+              <button className="skip-link" onClick={() => setShowCleared((v) => !v)}>
+                {showCleared ? "← Back to sessions" : `Show cleared sessions (${clearedSessions.length})`}
+              </button>
+            </div>
+          )}
 
           {unresolvedFlags.length > 0 && (
             <div className="flag-section">
@@ -5654,6 +5743,14 @@ function GlobalStyles() {
       .collapse-box.nested > .collapse-body { padding: 0 12px 12px; }
       .session-item { background: #14181F; border: 1px solid #232A35; border-radius: 10px; overflow: hidden; }
       .session-item.open { border-color: #3A4556; }
+      .session-item { position: relative; }
+      .session-clear-btn { position: absolute; top: 8px; right: 34px; z-index: 1; display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; background: none; border: 1px solid transparent; border-radius: 6px; color: #8B93A1; cursor: pointer; }
+      .session-clear-btn:hover:not(:disabled) { color: #E8A33D; border-color: #2A313B; background: #1A1F27; }
+      .session-clear-btn:disabled { opacity: .5; cursor: default; }
+      .session-row { padding-right: 70px !important; }
+      .clear-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 0 0 10px; font-size: 13px; color: #C9D0DA; }
+      .clear-undo { display: flex; align-items: center; gap: 12px; margin: 0 0 10px; padding: 8px 12px; border-radius: 8px; background: #1A1F27; font-size: 13px; color: #C9D0DA; }
+      .clear-toggle { margin: -4px 0 18px; }
       .session-row { width: 100%; display: flex; align-items: center; gap: 12px; padding: 10px 12px; background: none; border: 0; color: inherit; font: inherit; text-align: left; cursor: pointer; }
       .session-row:hover { background: #1A1F27; }
       .session-row:focus-visible { outline: 2px solid #E8A33D; outline-offset: -2px; }
