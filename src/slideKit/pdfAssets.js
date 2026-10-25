@@ -14,7 +14,8 @@ export function svgToPng(svg, scale = 2) {
   return new Promise((resolve, reject) => {
     try {
       const { w, h } = svgSize(svg);
-      const withSize = /<svg[^>]*\swidth=/.test(svg) ? svg : svg.replace("<svg", `<svg width="${w}" height="${h}"`);
+      // Mermaid emits width="100%": an image with no real pixel size rasterises at the wrong size, so force one.
+      const withSize = svg.replace(/<svg\b([^>]*)>/, (m, attrs) => `<svg${attrs.replace(/\s(width|height)="[^"]*"/g, "")} width="${w}" height="${h}">`);
       const img = new Image();
       img.onload = () => {
         try {
@@ -44,10 +45,12 @@ let counter = 0;
 // the dark theme used on screen.
 export async function diagramToSvgLight(code) {
   const mermaid = (await import("mermaid")).default;
-  const directive = '%%{init: {"theme":"neutral","flowchart":{"htmlLabels":false},"themeVariables":{"fontFamily":"Helvetica, Arial, sans-serif"}}}%%\n';
+  const directive = '%%{init: {"theme":"base","htmlLabels":false,"fontFamily":"Helvetica, Arial, sans-serif","flowchart":{"htmlLabels":false,"useMaxWidth":false},"state":{"htmlLabels":false},"class":{"htmlLabels":false},"themeVariables":{"primaryColor":"#e6f2ec","primaryBorderColor":"#256344","primaryTextColor":"#191c20","lineColor":"#3f4650","secondaryColor":"#fdf3df","tertiaryColor":"#eef1f4","fontFamily":"Helvetica, Arial, sans-serif","fontSize":"16px"}}}%%\n';
   const id = `sk-pdf-${++counter}`;
   try {
-    const { svg } = await mermaid.render(id, directive + code);
+    // With plain SVG labels Mermaid strips a bare < or >, so write them as entity codes inside quoted labels.
+    const safe = String(code).replace(/"([^"\n]*)"/g, (m, t) => `"${t.replace(/>/g, "#gt;").replace(/</g, "#lt;")}"`);
+    const { svg } = await mermaid.render(id, directive + safe);
     return svg;
   } finally {
     const stray = document.getElementById(`d${id}`) || document.getElementById(id);

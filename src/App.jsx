@@ -4,6 +4,7 @@ import SplashScreen, { VersionTag } from "./SplashScreen.jsx";
 import SlideView from "./slideKit/SlideView.jsx";
 import { Rich } from "./slideKit/MathText.jsx";
 import CodePane from "./slideKit/CodePane.jsx";
+import { SECTION_SYSTEM, sectionPrompt, MODULE_SYSTEM, modulePrompt, normalizeSectionNotes, normalizeModuleNotes, fallbackSectionNotes, fallbackModuleNotes } from "./slideKit/notesContent.js";
 import { normalizeSlide, slideToPlainContext, TYPE_LABELS, LANGUAGE_LABELS } from "./slideKit/schema.js";
 import { generateDeck } from "./slideKit/generate.js";
 import { DEMO_SHOWCASE_SLIDES } from "./slideKit/demoSlides.js";
@@ -936,43 +937,41 @@ async function callAIStream(systemPrompt, userPrompt, { onText, kind = "qa_strea
 // ---------------------------------------------------------------------------
 async function generateLectureNotes(curriculum, onProgress, upToCount) {
   const sections = [];
-  // Only the slides the student actually reached — notes should cover what they attended.
+  // Only the slides the student actually reached — notes cover what they attended.
   const count = Math.max(1, Math.min(upToCount || curriculum.slides.length, curriculum.slides.length));
+  const withRetry = async (system, prompt, maxTokens, label) => {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        return await callAI(system, prompt, maxTokens, GEMINI_MODEL_STRONG, "notes");
+      } catch (e) {
+        // free-tier limits are per minute: wait and retry instead of losing this section
+        if (!(e.rateLimited || e.busy) || attempt === 2) throw e;
+        onProgress && onProgress(`The AI is busy — retrying "${label}" in a few seconds…`);
+        await new Promise((r) => setTimeout(r, attempt === 0 ? 5000 : 12000));
+      }
+    }
+    throw new Error("empty response");
+  };
   for (let i = 0; i < count; i++) {
     const slide = curriculum.slides[i];
-    onProgress && onProgress(`Writing notes for "${slide.title}" (${i + 1}/${count})…`);
-    // Deliberately NOT written as "you are the lecturer" and deliberately
-    // NOT fed slide.notes (that's narration guidance for the spoken
-    // version) — both of those together were the reason earlier notes came
-    // out reading like a transcript of what was said live. This is framed
-    // as an independent textbook/study-guide entry instead.
-    const system = `You are writing a formal, textbook-style study guide entry for a course called ${curriculum.code} — ${curriculum.title}. This is NOT a transcript or summary of a spoken lecture and must not read like one — no filler words like "so" or "now", no conversational asides, no phrases like "as we covered" or "as mentioned." Write it as a proper written reference a student would read on their own afterward, the way a textbook or study guide covers a topic.
-
-For the given topic, write a well-structured explanation covering, where relevant: a clear definition or framing of the concept, how it works or the underlying reasoning, a concrete worked example (invent a good one if none is given), and why it matters or a common mistake to avoid.
-
-Write 3-5 well-developed paragraphs of formal written prose. No markdown formatting, no bullet points, no headers — plain paragraphs, since this is typeset directly into a PDF as body text.
-
-Formulas, worked-example steps, tables, code and diagrams are typeset separately by the document right after your text, so refer to them naturally ("the worked example below") but do not reproduce them. Never use LaTeX or code symbols in your prose; write mathematics in words or plain notation such as x^2 or a/b.`;
-    const prompt = `Topic: "${slide.title}". Everything the student saw on this slide:\n${slideToPlainContext(slide)}\n\nWrite the study-guide entry for this topic.${slide.hasCode ? " As part of it, explain the code example in depth: what each part does and why." : ""}${slide.steps ? " Explain the method used in the worked example and the reasoning behind each step." : ""}`;
-    let explanation;
+    onProgress && onProgress(`Organising notes for "${slide.title}" (${i + 1}/${count})…`);
+    // Structured JSON (summary, key points, explanation, terms, pitfalls, review). Not fed
+    // slide.notes (spoken narration) so the result reads as study notes, not a transcript.
+    let notes = null;
     try {
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          explanation = await callAI(system, prompt, 1500, GEMINI_MODEL_STRONG, "notes");
-          break;
-        } catch (e) {
-          // free-tier limits are per minute: wait and retry instead of losing this section
-          if (!(e.rateLimited || e.busy) || attempt === 2) throw e;
-          onProgress && onProgress(`The AI is busy — retrying "${slide.title}" in a few seconds…`);
-          await new Promise((r) => setTimeout(r, attempt === 0 ? 5000 : 12000));
-        }
-      }
-      if (!explanation) throw new Error("empty response");
-    } catch (e) {
-      explanation = "Detailed notes for this section couldn't be generated right now — please refer to the key points covered during the live session.";
-    }
-    sections.push({ title: slide.title, explanation, code: slide.hasCode ? slide.code : null, slide });
+      const raw = await withRetry(SECTION_SYSTEM(curriculum), sectionPrompt(slide, slideToPlainContext(slide)), 1800, slide.title);
+      notes = normalizeSectionNotes(raw);
+    } catch (e) { /* fall through to notes built from the slide */ }
+    if (!notes) notes = fallbackSectionNotes(slide);
+    sections.push({ title: slide.title, notes, explanation: notes.explanation.join("\n\n"), code: slide.hasCode ? slide.code : null, slide });
   }
+  onProgress && onProgress("Writing the module overview and summary…");
+  let moduleNotes = null;
+  try {
+    moduleNotes = normalizeModuleNotes(await withRetry(MODULE_SYSTEM(curriculum), modulePrompt(curriculum, sections), 1200, "module summary"));
+  } catch (e) { /* use fallback */ }
+  const fb = fallbackModuleNotes(curriculum, sections);
+  sections.module = moduleNotes ? { ...fb, ...Object.fromEntries(Object.entries(moduleNotes).filter(([, v]) => v && (!Array.isArray(v) || v.length))) } : fb;
   return sections;
 }
 
@@ -995,7 +994,7 @@ async function generateSessionSummary(curriculum, messages) {
 }
 
 async function downloadLectureNotesPdf(curriculum, sections) {
-  const doc = await buildLectureNotesPdf(curriculum, sections);
+  const doc = await buildLectureNotesPdf(curriculum, sections, sections.module);
   const safeName = `${curriculum.code}-${curriculum.unit}`.replace(/[^a-z0-9\-_. ]/gi, "").replace(/\s+/g, "_");
   doc.save(`${safeName}-notes.pdf`);
 }
