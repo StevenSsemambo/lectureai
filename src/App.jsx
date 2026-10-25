@@ -49,6 +49,7 @@ import FlagReviewCard from "./learning/FlagReviewCard.jsx";
 import DetourBoard from "./detour/DetourBoard.jsx";
 import { rowsToCourses, cleanCourseList, cleanSlideList, hasSlides, rowList } from "./dataGuards.js";
 import { withTimeout } from "./net.js";
+import { originCore, originDetail, originFallbackAnswer, isOriginQuestion } from "./persona/origin.js";
 import { VISUAL_PROMPT, parseAnswerWithVisual, buildDetourBoard, checkBoard, cleanMermaid, mermaidRepairPrompt, holdMs, detoursEnabled, boardContext, createDetourController } from "./detour/detour.js";
 import { PERSONAS, PERSONA_IDS, MAX_NAME, MAX_NOTE, DEFAULT_PERSONA, resolvePersona, lecturerIdentityFor, introPreview, introGuidance, sanitizeName, sanitizeStyleNote } from "./persona/persona.js";
 import { quizFeedback, questionAck } from "./persona/feedback.js";
@@ -4304,7 +4305,11 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
       const ackPromise = speakInterruptible(ack, { onStart: () => logTiming("qa_ack_start", { client_ms: performance.now() - tQuestion }) });
 
       const answerBudget = Math.max(45, Math.round(wordBudget * 0.6));
-      const fallbackAnswer = typeof navigator !== "undefined" && navigator.onLine === false
+      // "Who made you?" is always answerable, even offline or when the AI is down.
+      const originQ = isOriginQuestion(questionText);
+      const fallbackAnswer = originQ
+        ? originFallbackAnswer()
+        : typeof navigator !== "undefined" && navigator.onLine === false
         ? "You're offline right now, so I can't answer new questions. Ask me again when you're back online, and carry on with the saved lecture in the meantime."
         : "Good question — let me pick that up right after this.";
       // Structured output so the AI honestly self-assesses whether it
@@ -4327,7 +4332,7 @@ ${NATURAL_SPEECH_STYLE}`;
       const picked = pickCorrections(questionText, correctionsRef.current);
       const detoursOn = detoursOnRef.current;
       const convoBlock = conversationBlock(conversationRef.current, { slideTitle: slide.title });
-      const qSystem = system + (detoursOn ? VISUAL_PROMPT : "") + correctionsPromptBlock(picked) + avoidOpenings(conversationRef.current);
+      const qSystem = system + originCore() + (originQ ? originDetail() : "") + (detoursOn ? VISUAL_PROMPT : "") + correctionsPromptBlock(picked) + avoidOpenings(conversationRef.current);
       const qPrompt = (convoBlock ? `${convoBlock}\n\n` : "") + prompt + (boardBefore ? `\n\n${boardContext(boardBefore)}` : "");
       // Streaming: speak each sentence as soon as it has arrived instead of waiting for the whole answer.
       const streamOn = streamingOn();
