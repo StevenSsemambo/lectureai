@@ -172,7 +172,8 @@ tr.sk-focus > th, tr.sk-focus > td { background: rgba(232, 163, 61, 0.12); }
 
 /* Bigger display: diagrams/plots scale to the available height instead of forcing a scroll */
 .sk-diagram { padding: 8px; }
-.sk-diagram svg { max-width: 100%; max-height: calc(100dvh - 300px); min-height: 160px; width: auto; height: auto; margin: 0 auto; display: block; }
+/* A diagram may grow to about 1.6x its natural size (small ones were hard to read) and may be tall: the stage scrolls instead of shrinking the text. */
+.sk-diagram svg { max-width: min(100%, calc(var(--sk-natural-w, 900px) * 1.6)) !important; width: 100%; max-height: max(420px, calc(100dvh - 230px)); min-height: 160px; height: auto; margin: 0 auto; display: block; }
 .sk-plot svg { width: 100%; max-height: calc(100dvh - 300px); }
 .sk-visual { min-width: 0; }
 .sk-formulas { margin-top: 12px; gap: 8px; }
@@ -221,3 +222,19 @@ tr.sk-focus > th, tr.sk-focus > td { background: rgba(232, 163, 61, 0.12); }
   .sk-ln { flex: 0 0 auto; }
   .sk-run-btn { min-height: 40px; }
 }
+
+/* Diagram: enlarge button and zoom view */
+.sk-diagram-wrap { position: relative; }
+.sk-enlarge { position: absolute; top: 8px; right: 8px; z-index: 2; background: rgba(20,24,31,0.88); color: #EDEFF2; border: 1px solid #3A4556; border-radius: 8px; padding: 6px 12px; font: inherit; font-size: 12.5px; font-weight: 600; cursor: pointer; min-height: 32px; }
+.sk-enlarge:hover { border-color: #E8A33D; }
+.sk-enlarge:focus-visible, .sk-zoom-btn:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.sk-zoom-scrim { position: fixed; inset: 0; z-index: 1000; background: #0C0F14; display: flex; flex-direction: column; }
+.sk-zoom-bar { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid #2A313C; flex-wrap: wrap; }
+.sk-zoom-tools { display: inline-flex; align-items: center; gap: 8px; }
+.sk-zoom-btn { background: #232C38; color: #EDEFF2; border: 1px solid #3A4556; border-radius: 8px; padding: 8px 14px; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; min-height: 40px; min-width: 40px; }
+.sk-zoom-btn:hover { border-color: #E8A33D; }
+.sk-zoom-level { min-width: 52px; text-align: center; color: #C7CCD4; font-size: 13px; }
+.sk-zoom-body { flex: 1 1 auto; overflow: auto; padding: 16px; -webkit-overflow-scrolling: touch; }
+.sk-zoom-svg { margin: 0 auto; }
+.sk-zoom-svg svg { width: 100% !important; max-width: none !important; height: auto !important; max-height: none !important; display: block; }
+.sk-zoom-caption { padding: 8px 14px 12px; text-align: center; color: #8890A0; font-size: 13px; border-top: 1px solid #2A313C; }

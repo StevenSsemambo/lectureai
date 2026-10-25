@@ -11,6 +11,7 @@
 
 import { normalizeSlide } from "../slideKit/schema.js";
 import { validateSlide } from "../slideKit/validate.js";
+import { DIAGRAM_CHOICE_GUIDE, fixDiagramShapes } from "../slideKit/diagramGuide.js";
 
 export const DETOUR_KINDS = ["diagram", "slide", "code", "highlight"];
 
@@ -26,6 +27,7 @@ export const VISUAL_PROMPT = `
 OPTIONAL ON-SCREEN VISUAL. Most questions need only a spoken answer, so leave "visual" out (or null) for those. Add it ONLY when the student asks to see, draw, show or demonstrate something, or when a picture or a short piece of code is clearly much clearer than words. When you add one, your spoken "answer" must walk the student through it ("look at the diagram: first..."), yet still make sense on its own in case the picture cannot be shown.
 The full reply shape is then: {"confidence": "high" | "low", "answer": "...", "visual": <one of the shapes below>}
 - Diagram: {"kind":"diagram","title":"short title","mermaid":"flowchart TD\\n  A[\\"Start\\"] --> B[\\"Next step\\"]","caption":"one line"}  (Mermaid syntax; at most 12 nodes; put every label in double quotes; no HTML, no click handlers.)
+${DIAGRAM_CHOICE_GUIDE}
 - Mini slide: {"kind":"slide","title":"short title","bullets":["point","point"]}  (at most 5 short bullets.)
 - Code the student wants to see (not on the slide): {"kind":"code","title":"short title","language":"java","code":"...","expectedOutput":"optional"}  (at most 25 lines; complete and correct.)
 - Point at part of the code ALREADY on the slide: {"kind":"highlight","lines":[3,5]}  (1-based line numbers; only when the slide has code.)`;
@@ -70,7 +72,7 @@ export function cleanMermaid(code) {
   // Interactive directives and raw HTML have no place in a teaching board.
   c = c.split("\n").filter((line) => !/^\s*(click|callback|link)\b/i.test(line)).join("\n");
   c = c.replace(/<\s*\/?\s*(script|iframe|object|embed|style)[^>]*>/gi, "");
-  return c.trim();
+  return fixDiagramShapes(c.trim()).code;
 }
 
 // Turn the model's `visual` into a ready-to-render board, or null when it is unusable.
