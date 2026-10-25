@@ -185,7 +185,7 @@ export async function buildLectureNotesPdf(curriculum, sections, moduleInfo) {
       }
       if (sl.diagram) {
         label("Diagram");
-        const ok = await picture(diagramToSvgLight(fixDiagramShapes(sl.diagram.code)));
+        const ok = await picture(diagramToSvgLight(fixDiagramShapes(sl.diagram.code).code));
         if (!ok) para(`(Diagram: ${plain(sl.diagram.caption || "see the live lecture")})`, { color: SOFT, size: 10 });
         else if (sl.diagram.caption) para(`Figure: ${plain(sl.diagram.caption)}`, { size: 10, color: SOFT, style: "italic" });
         y += 4;
