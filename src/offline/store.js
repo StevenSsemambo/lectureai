@@ -4,6 +4,8 @@
 // (lost when the page closes). Every call is safe: if storage is blocked or full, it falls through to
 // the next place and never throws into the lecture.
 
+import { safeLocalStorage, safeIndexedDB } from "../safeStorage.js";
+
 const DB_NAME = "semai-offline";
 const STORE_NAME = "kv";
 
@@ -18,7 +20,7 @@ export function memoryBackend() {
   };
 }
 
-export function localStorageBackend(storage = typeof localStorage !== "undefined" ? localStorage : null, prefix = "semai_off:") {
+export function localStorageBackend(storage = safeLocalStorage(), prefix = "semai_off:") {
   if (!storage) return null;
   return {
     name: "localStorage",
@@ -29,7 +31,7 @@ export function localStorageBackend(storage = typeof localStorage !== "undefined
   };
 }
 
-export function indexedDbBackend(idb = typeof indexedDB !== "undefined" ? indexedDB : null) {
+export function indexedDbBackend(idb = safeIndexedDB()) {
   if (!idb) return null;
   let dbPromise = null;
   const open = () => {

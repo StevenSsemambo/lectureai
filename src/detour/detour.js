@@ -11,6 +11,7 @@
 
 import { normalizeSlide } from "../slideKit/schema.js";
 import { validateSlide } from "../slideKit/validate.js";
+import { safeLocalStorage } from "../safeStorage.js";
 import { DIAGRAM_CHOICE_GUIDE, fixDiagramShapes } from "../slideKit/diagramGuide.js";
 
 export const DETOUR_KINDS = ["diagram", "slide", "code", "highlight"];
@@ -141,7 +142,7 @@ export function holdMs(kind) {
 // Kill switch: localStorage.setItem("semai_detours", "off") turns the feature off in this browser.
 export function detoursEnabled(storage) {
   try {
-    const s = storage || (typeof localStorage !== "undefined" ? localStorage : null);
+    const s = storage || safeLocalStorage();
     return !(s && s.getItem("semai_detours") === "off");
   } catch (e) {
     return true;

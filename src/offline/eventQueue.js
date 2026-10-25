@@ -4,6 +4,8 @@
 // Stored in localStorage (small rows) under one key. Capped, so a long offline stretch cannot fill the
 // device, and every send removes only what was actually accepted.
 
+import { safeLocalStorage } from "../safeStorage.js";
+
 const KEY = "semai_pending_v1";
 const MAX_ROWS = 600;
 
@@ -14,7 +16,7 @@ function read(storage) {
 function write(storage, q) {
   try { storage.setItem(KEY, JSON.stringify(q)); return true; } catch (e) { return false; }
 }
-const defaultStorage = () => (typeof localStorage !== "undefined" ? localStorage : null);
+const defaultStorage = () => safeLocalStorage();
 
 export function queueEvents(rows, storage = defaultStorage()) {
   if (!storage || !Array.isArray(rows) || !rows.length) return 0;

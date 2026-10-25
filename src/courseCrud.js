@@ -1,3 +1,6 @@
+import { cleanSlideList } from "./dataGuards.js";
+import { normalizeSlide } from "./slideKit/schema.js";
+
 // Pure helpers for editing, copying and deleting a lecturer's courses and modules.
 // Kept free of React and network code so they are easy to test.
 
@@ -13,7 +16,8 @@ export function moduleToSetup(module) {
     },
     rawText: "",
     fileName: "",
-    draft: { unit: module.unit || "", slides: (module.slides || []).map((s) => ({ ...s })) },
+    // Slides are re-shaped on the way in, so a module saved by an older version (or with damaged slide data) can still be edited.
+    draft: { unit: module.unit || "", slides: cleanSlideList(module.slides).map((s, i) => normalizeSlide({ ...s }, i)) },
     phase: "preview",
     error: "",
     editingModuleId: module.id,
