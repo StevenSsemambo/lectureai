@@ -236,3 +236,6 @@ When a student's question is best answered by showing something, the AI lecturer
 - **Boundaries** (`Boundary` in `src/errorLogging.jsx`): a crash is contained to one screen or one panel, with "Try again"; the root boundary is the last resort. A module with no slides shows a plain message instead of opening the lecture room.
 - **Start-up fallback** (`index.html`): if the app script fails to load, a plain "trouble starting" message with Reload replaces the blank page.
 - **Tests:** `npm test` covers the guards, timeouts and safe storage; `.tests/e2e/` has the optional browser fault-injection and random-click tests (see its README).
+
+- **Safety-net messages** (`src/toast.js`, `src/ToastHost.jsx`): any failure nobody handled (for example inside a button click) becomes ONE calm sentence at the bottom of the screen ("That took too long...", "Your session expired...", "Something didn't work. Please try again.") instead of silently doing nothing. Messages are plain language (never raw errors), merged if repeated within 5 seconds, limited to 3 a minute, and ignore harmless noise (cancelled requests, blocked autoplay, browser-extension errors).
+- **A failing slide never freezes the lecture:** the autopilot skips a slide that throws and tells the student; after three failures in a row it pauses with a message so they can use Next/Prev.

@@ -1,0 +1,25 @@
+# dependencies and build output
+node_modules/
+dist/
+.vite/
+
+# environment and secrets (never commit keys or tokens)
+.env
+.env.*
+!.env.example
+*.pem
+
+# logs and editor/OS files
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# local test artifacts
+.tests/e2e/__pycache__/
+__pycache__/
+*.pyc
+playwright-report/
+test-results/

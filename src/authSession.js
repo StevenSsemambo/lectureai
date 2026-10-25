@@ -1,7 +1,7 @@
 // Keeps a lecturer's sign-in alive for as long as the tab is open.
 //
-// Supabase access tokens (JWTs) last about an hour. The app used to refresh them only once, when the
-// page loaded, so a lecturer who stayed on the page for more than an hour got "JWT expired" (401) on
+// Supabase access tokens (JWTs) are short-lived (about 15 minutes on the live project). The app used to refresh them only once, when the
+// page loaded, so a lecturer who stayed on the page past that got "JWT expired" (401) on
 // every save, and saves made while signed out were rejected by row-level security (403). This manager
 // hands out a token that is guaranteed fresh, refreshes at most once at a time (refresh tokens rotate,
 // so two simultaneous refreshes would break each other), and retries a call once if the server still

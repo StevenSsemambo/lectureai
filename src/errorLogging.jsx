@@ -12,6 +12,7 @@
 //    can't flood the table.
 
 import React from "react";
+import { reportFailure } from "./toast.js";
 
 export const APP_VERSION = typeof __APP_VERSION__ !== "undefined" ? __APP_VERSION__ : "dev";
 
@@ -80,9 +81,16 @@ export function installErrorLogging({ url, key }) {
       line: event.lineno || null,
       col: event.colno || null,
     });
+    // Safety net: an error nobody handled (e.g. inside a button click) must not fail silently.
+    try {
+      // Errors from browser extensions or other sites' scripts are not ours: do not alarm the person about them.
+      const fromUs = !event.filename || String(event.filename).startsWith(location.origin);
+      if (fromUs) reportFailure(event.error || event.message);
+    } catch (e) { /* never throw from here */ }
   });
   window.addEventListener("unhandledrejection", (event) => {
     logClientError("unhandledrejection", event.reason || "Unhandled promise rejection");
+    try { reportFailure(event.reason); } catch (e) { /* never throw from here */ }
   });
 }
 

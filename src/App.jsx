@@ -49,6 +49,7 @@ import FlagReviewCard from "./learning/FlagReviewCard.jsx";
 import DetourBoard from "./detour/DetourBoard.jsx";
 import { rowsToCourses, cleanCourseList, cleanSlideList, hasSlides, rowList } from "./dataGuards.js";
 import { withTimeout } from "./net.js";
+import { notify } from "./toast.js";
 import { originCore, originDetail, originFallbackAnswer, isOriginQuestion } from "./persona/origin.js";
 import { VISUAL_PROMPT, parseAnswerWithVisual, buildDetourBoard, checkBoard, cleanMermaid, mermaidRepairPrompt, holdMs, detoursEnabled, boardContext, createDetourController } from "./detour/detour.js";
 import { PERSONAS, PERSONA_IDS, MAX_NAME, MAX_NOTE, DEFAULT_PERSONA, resolvePersona, lecturerIdentityFor, introPreview, introGuidance, sanitizeName, sanitizeStyleNote } from "./persona/persona.js";
@@ -4139,14 +4140,38 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
   const runAutopilot = useCallback(async () => {
     const runToken = navTokenRef.current;
     if (!introDoneRef.current) {
-      await runIntro();
+      // The welcome is a nicety: if it fails, carry on into the lecture rather than stopping before it starts.
+      try {
+        await runIntro();
+      } catch (err) {
+        logClientError("lecture.intro", err);
+        introDoneRef.current = true;
+        if (mountedRef.current) setLecturerState2("idle");
+      }
     }
+    let failures = 0;
     for (let i = slideIndexRef.current; i < curriculum.slides.length; i++) {
       if (!mountedRef.current || !autopilotEnabledRef.current) return null;
       // the student jumped to another slide while this run was busy: hand over to a fresh run from where they are now
       if (navTokenRef.current !== runToken) return "restart";
       setSlideIndex(i);
-      await teachSlide(i);
+      // One slide going wrong must not freeze the whole lecture: skip it, tell the student, keep going. After three
+      // problems in a row, pause so they can take over with Next/Prev instead of watching it fail repeatedly.
+      try {
+        await teachSlide(i);
+        failures = 0;
+      } catch (err) {
+        logClientError("lecture.slide", err, { slide: i });
+        if (!mountedRef.current) return null;
+        setLecturerState2("idle");
+        failures += 1;
+        if (failures >= 3) {
+          notify("The lecture paused after a few problems. Use Next to continue, or turn Auto-lecture back on.");
+          setAutopilotOn(false);
+          return null;
+        }
+        notify("That slide hit a problem, so I'm moving on to the next one.");
+      }
     }
     if (navTokenRef.current !== runToken) return "restart";
     if (mountedRef.current) setSessionComplete(true);
@@ -4167,7 +4192,11 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
         },
         (err) => {
           autopilotRunningRef.current = false;
-          throw err; // still reported by the global error logger, exactly as before
+          logClientError("lecture.autopilot", err);
+          if (mountedRef.current) {
+            setLecturerState2("idle");
+            notify("The lecture stopped unexpectedly. Use Next to continue, or turn Auto-lecture back on.");
+          }
         }
       );
     }
@@ -4214,11 +4243,11 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
   );
 
   useEffect(() => {
-    if (sessionComplete) finalizeSession(true);
+    if (sessionComplete) finalizeSession(true).catch((e) => logClientError("session.finalize", e));
   }, [sessionComplete, finalizeSession]);
 
   const handleLeaveClick = () => {
-    finalizeSession(false); // fire-and-forget — don't block leaving the room on this
+    finalizeSession(false).catch((e) => logClientError("session.finalize", e)); // fire-and-forget — don't block leaving the room on this
     onLeave();
   };
 

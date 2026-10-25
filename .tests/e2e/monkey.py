@@ -12,6 +12,7 @@ COURSE = {"id": "c1", "code": "TST1", "title": "Test", "institution": "U", "tone
 MODULE = {"id": "m1", "course_id": "c1", "unit": "Unit 1", "duration_minutes": 45, "pace": "standard", "allow_live_code": True, "slides": SLIDES, "created_at": "2026-01-01"}
 FAKE_SPEECH = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "fault.py")).read().split('FAKE_SPEECH = """')[1].split('"""')[0]
 
+TOASTS = []
 def run(p, role, seconds, seed):
     rnd = random.Random(seed)
     b = p.chromium.launch(); ctx = b.new_context(viewport={"width": rnd.choice([390, 768, 1280]), "height": 860}); pg = ctx.new_page()
@@ -19,6 +20,7 @@ def run(p, role, seconds, seed):
     pg.on("pageerror", lambda e: errs.append(str(e)[:160]))
     pg.on("dialog", lambda d: d.accept() if rnd.random() < .5 else d.dismiss())
     pg.add_init_script(FAKE_SPEECH)
+    pg.add_init_script("""window.__toasts=[];new MutationObserver(()=>{document.querySelectorAll('[aria-label="Notifications"] [role]').forEach(n=>{const t=n.innerText.replace(/×/g,'').trim();if(t&&!window.__toasts.includes(t))window.__toasts.push(t)})}).observe(document,{childList:true,subtree:true});""")
     if role == "lecturer":
         sess = {"accessToken": jwt(int(time.time()) + 900), "refreshToken": "r1", "user": {"id": "u1", "email": "l@x.com"}}
         pg.add_init_script(f"localStorage.setItem('semai_lecturer_session', {json.dumps(json.dumps(sess))});")
@@ -83,6 +85,8 @@ def run(p, role, seconds, seed):
         crashed = pg.locator("text=Something went wrong").count() or pg.locator("text=ran into a problem").count() or pg.locator("text=couldn’t be shown").count()
         if crashed: errs.append("BOUNDARY SHOWN: " + (pg.inner_text("body")[:0] or "") + str(pg.locator("[role=alert]").first.inner_text())[:100]); break
     blank = pg.evaluate("document.getElementById('root').innerText.trim().length === 0")
+    try: TOASTS.extend(pg.evaluate("window.__toasts||[]"))
+    except Exception: pass
     ctx.close(); b.close()
     return actions, errs, logged, blank
 

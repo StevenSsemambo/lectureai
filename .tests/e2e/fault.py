@@ -74,6 +74,7 @@ def run(p, name, proxy="ok", rest="empty", init=None, block=None, offline_after=
     page = ctx.new_page()
     errs = []
     page.on("pageerror", lambda e: errs.append("pageerror: " + str(e)[:160]))
+    page.add_init_script("""window.__toasts=[];new MutationObserver(()=>{document.querySelectorAll('[aria-label="Notifications"] [role]').forEach(n=>{const t=n.innerText.replace(/×/g,'').trim();if(t&&!window.__toasts.includes(t))window.__toasts.push(t)})}).observe(document,{childList:true,subtree:true});""")
     page.add_init_script(FAKE_SPEECH if "nospeech" not in (init or "") else "")
     if init and init != "nospeech": page.add_init_script(init)
     if init == "nospeech":
@@ -129,10 +130,12 @@ def run(p, name, proxy="ok", rest="empty", init=None, block=None, offline_after=
     crash = page.locator("text=Something went wrong").count() > 0
     try: root_empty = page.evaluate("document.getElementById('root').innerText.trim().length === 0")
     except Exception: root_empty = None
+    try: toasts = page.evaluate("window.__toasts || []")
+    except Exception: toasts = []
     ctx.close(); browser.close()
     bad = [e for e in errs if not e.startswith("harness")]
     ok = (not crash) and (not root_empty) and (not bad)
-    return {"answered": answered, "empty_msg": status.get("empty_msg"), "name": name, "ok": ok, "crash_screen": crash, "blank": root_empty, "room": status["room"], "errors": errs}
+    return {"toasts": toasts, "answered": answered, "empty_msg": status.get("empty_msg"), "name": name, "ok": ok, "crash_screen": crash, "blank": root_empty, "room": status["room"], "errors": errs}
 
 SCENARIOS = {
   "baseline": dict(),
@@ -181,6 +184,7 @@ if __name__ == "__main__":
                 print("   logged:", le.get("kind"), "|", (le.get("message") or "")[:140], "|", ((le.get("stack") or "").split("\n")[1:3]))
                 cs = (le.get("context") or {}).get("componentStack")
                 if cs: print("   component stack:", " > ".join(x.strip() for x in cs.strip().split("\n")[:4]))
+            if r.get("toasts"): print("        toasts:", r["toasts"])
             if not r["ok"] or r["errors"]:
                 for e in r["errors"][:4]: print("        ", e)
             sys.stdout.flush()
