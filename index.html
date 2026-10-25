@@ -10,6 +10,29 @@
   </head>
   <body style="margin: 0; background: #14181C;">
     <div id="root"></div>
+    <noscript>
+      <p style="font-family: system-ui, sans-serif; color: #EDEFF2; text-align: center; padding: 40px 20px;">SEMAI needs JavaScript to run. Please turn it on in your browser settings and reload.</p>
+    </noscript>
+    <script>
+      // Safety net for a failed start: if the app's own script cannot load (blocked, an old cached copy, a bad
+      // connection) or React never draws anything, show a plain message with a Reload button instead of a
+      // blank dark page. It does nothing once the app has drawn something.
+      (function () {
+        function show() {
+          var root = document.getElementById("root");
+          if (!root || root.childNodes.length) return;
+          root.innerHTML =
+            '<div role="alert" style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;text-align:center;color:#EDEFF2;font-family:system-ui,sans-serif">' +
+            '<div style="max-width:360px"><h1 style="font-size:20px;margin:0 0 8px">SEMAI is having trouble starting</h1>' +
+            '<p style="color:#8890A0;font-size:14px;line-height:1.5;margin:0 0 16px">Check your internet connection, then reload. If it keeps happening, try again in a few minutes.</p>' +
+            '<button onclick="location.reload()" style="background:#EDEFF2;color:#14181C;border:0;border-radius:8px;padding:10px 18px;font-size:14px;font-weight:600;cursor:pointer">Reload</button></div></div>';
+        }
+        window.addEventListener("error", function (e) {
+          if (e && e.target && e.target.tagName === "SCRIPT") setTimeout(show, 800);
+        }, true);
+        setTimeout(show, 15000);
+      })();
+    </script>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

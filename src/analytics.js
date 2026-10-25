@@ -13,6 +13,7 @@
 // without the account id (as an anonymous event) rather than being lost.
 
 import { queueEvents, drainQueue } from "./offline/eventQueue.js";
+import { safeLocalStorage } from "./safeStorage.js";
 
 let cfg = null;
 let buffer = [];
@@ -23,7 +24,7 @@ const BATCH = 40;
 
 const clip = (v, n) => (v === undefined || v === null || v === "" ? null : String(v).slice(0, n));
 
-export function getStudentKey(storage = typeof localStorage !== "undefined" ? localStorage : null) {
+export function getStudentKey(storage = safeLocalStorage()) {
   try {
     let k = storage && storage.getItem("semai_student_key");
     if (!k) {

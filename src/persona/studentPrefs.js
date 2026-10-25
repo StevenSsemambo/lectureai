@@ -1,6 +1,8 @@
 // How THIS student likes to be taught. Stored only on their device, applies to every course, and only ever
 // changes tone and how often the lecturer offers things. It never changes what is taught or assessed.
 
+import { safeLocalStorage } from "../safeStorage.js";
+
 export const STYLE_KEY = "semai_style";
 export const FEEDBACK_STYLES = {
   default: { label: "Course default", blurb: "The lecturer's own style for this course." },
@@ -18,10 +20,10 @@ export function cleanPrefs(p) {
   };
 }
 
-export function loadPrefs(storage = (typeof localStorage !== "undefined" ? localStorage : null)) {
+export function loadPrefs(storage = safeLocalStorage()) {
   try { return cleanPrefs(JSON.parse(storage.getItem(STYLE_KEY))); } catch (e) { return { ...DEFAULT_PREFS }; }
 }
-export function savePrefs(p, storage = (typeof localStorage !== "undefined" ? localStorage : null)) {
+export function savePrefs(p, storage = safeLocalStorage()) {
   try { storage.setItem(STYLE_KEY, JSON.stringify(cleanPrefs(p))); } catch (e) { /* storage unavailable: the choice lasts for this visit */ }
 }
 

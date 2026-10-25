@@ -12,7 +12,7 @@ import { buildLectureNotesPdf } from "./slideKit/notesPdf.js";
 import { scrollTopForBlock } from "./slideKit/scroll.js";
 import { extractBlocks, matchSentenceToBlock } from "./slideKit/focus.js";
 import { logTiming, getTimingSummary } from "./telemetry.js";
-import { logClientError } from "./errorLogging.jsx";
+import { logClientError, Boundary } from "./errorLogging.jsx";
 import { startTracking, track, flushEvents, stopTracking, getStudentKey, slideKeyFor, postStandaloneEvents, flushQueuedEvents } from "./analytics.js";
 import { attentionScore, heatLevel, whyFlagged, formatDwell } from "./slideKit/insights.js";
 import CheckCard from "./slideKit/CheckCard.jsx";
@@ -46,6 +46,8 @@ import { pickDiagnostic, diagnosticLead, diagnosticNoGap, diagnosticGapPrompt, d
 import { welcomeBackLine, createPauseTracker, breakNudgeDue, BREAK_NUDGE_TEXT, pauseHotspot, engagementSummary, focusRhythmText } from "./learning/pauses.js";
 import FlagReviewCard from "./learning/FlagReviewCard.jsx";
 import DetourBoard from "./detour/DetourBoard.jsx";
+import { rowsToCourses, cleanCourseList, cleanSlideList, hasSlides, rowList } from "./dataGuards.js";
+import { withTimeout } from "./net.js";
 import { VISUAL_PROMPT, parseAnswerWithVisual, buildDetourBoard, checkBoard, cleanMermaid, mermaidRepairPrompt, holdMs, detoursEnabled, boardContext, createDetourController } from "./detour/detour.js";
 import { PERSONAS, PERSONA_IDS, MAX_NAME, MAX_NOTE, DEFAULT_PERSONA, resolvePersona, lecturerIdentityFor, introPreview, introGuidance, sanitizeName, sanitizeStyleNote } from "./persona/persona.js";
 import { quizFeedback, questionAck } from "./persona/feedback.js";
@@ -166,7 +168,7 @@ function buildRoomData(course, module) {
   return {
     courseId: course.id,
     moduleId: module.id,
-    curriculum: { code: course.code, title: course.title, unit: module.unit, slides: (module.slides || []).map((sl, i) => normalizeSlide(sl, i)) },
+    curriculum: { code: course.code, title: course.title, unit: module.unit, slides: cleanSlideList(module.slides).map((sl, i) => normalizeSlide(sl, i)) },
     settings: {
       courseCode: course.code,
       courseTitle: course.title,
@@ -304,24 +306,27 @@ async function supabaseRequest(path, options = {}, accessToken = null) {
   // that's what lets Postgres RLS resolve auth.uid() to the right user and
   // enforce "you can only write your own courses." The anon key alone always
   // resolves auth.uid() to null, which is why RLS treats it as anonymous.
-  const res = await fetch(`${SUPABASE_URL}/rest/v1${path}`, {
-    ...options,
-    headers: {
-      apikey: SUPABASE_ANON_KEY,
-      Authorization: `Bearer ${accessToken || SUPABASE_ANON_KEY}`,
-      "Content-Type": "application/json",
-      Prefer: "return=representation",
-      ...(options.headers || {}),
-    },
-  });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Supabase request failed (${res.status}): ${text.slice(0, 200)}`);
-  }
-  if (res.status === 204) return null;
-  // Prefer: return=minimal yields a 201 with an empty body — don't try to parse it.
-  const bodyText = await res.text();
-  return bodyText ? JSON.parse(bodyText) : null;
+  return withTimeout(async (signal) => {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1${path}`, {
+      ...options,
+      signal: options.signal || signal,
+      headers: {
+        apikey: SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${accessToken || SUPABASE_ANON_KEY}`,
+        "Content-Type": "application/json",
+        Prefer: "return=representation",
+        ...(options.headers || {}),
+      },
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`Supabase request failed (${res.status}): ${text.slice(0, 200)}`);
+    }
+    if (res.status === 204) return null;
+    // Prefer: return=minimal yields a 201 with an empty body — don't try to parse it.
+    const bodyText = await res.text();
+    return bodyText ? JSON.parse(bodyText) : null;
+  }, 25000);
 }
 
 // ---------------------------------------------------------------------------
@@ -331,16 +336,19 @@ async function supabaseRequest(path, options = {}, accessToken = null) {
 // account system.
 // ---------------------------------------------------------------------------
 async function authRequest(path, body) {
-  const res = await fetch(`${SUPABASE_URL}/auth/v1${path}`, {
-    method: "POST",
-    headers: { apikey: SUPABASE_ANON_KEY, "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) {
-    throw new Error(data.msg || data.error_description || data.error || `Auth request failed (${res.status})`);
-  }
-  return data;
+  return withTimeout(async (signal) => {
+    const res = await fetch(`${SUPABASE_URL}/auth/v1${path}`, {
+      method: "POST",
+      headers: { apikey: SUPABASE_ANON_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.msg || data.error_description || data.error || `Auth request failed (${res.status})`);
+    }
+    return data;
+  }, 25000);
 }
 
 async function signUpUser(email, password, metadata = null) {
@@ -405,18 +413,22 @@ async function createStudentProfile(session, { username, fullName }) {
 // Calls the `account` Edge Function (sign-up, username sign-in, password reset by recovery code).
 async function accountRequest(action, body) {
   let res;
+  let data;
   try {
-    res = await fetch(`${SUPABASE_URL}/functions/v1/account`, {
-      method: "POST",
-      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ action, ...body }),
-    });
+    ({ res, data } = await withTimeout(async (signal) => {
+      const r = await fetch(`${SUPABASE_URL}/functions/v1/account`, {
+        method: "POST",
+        headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ action, ...body }),
+        signal,
+      });
+      return { res: r, data: await r.json().catch(() => ({})) };
+    }, 25000));
   } catch (e) {
     const err = new Error(e && e.message ? e.message : "Failed to fetch");
     err.status = 0;
     throw err;
   }
-  const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const err = new Error((data.error || `Request failed (${res.status})`) + (data.detail ? ` [${String(data.detail).slice(0, 120)}]` : ""));
     err.status = res.status;
@@ -461,31 +473,7 @@ async function fetchCoursesFromSupabase() {
     supabaseRequest("/courses?select=*&order=created_at.asc"),
     supabaseRequest("/modules?select=*&order=created_at.asc"),
   ]);
-  return courseRows.map((c) => ({
-    id: c.id,
-    code: c.code,
-    title: c.title,
-    institution: c.institution || "",
-    tone: c.tone,
-    voiceProvider: c.voice_provider,
-    elevenLabsApiKey: "", // deliberately never fetched — see security note above
-    elevenLabsVoiceId: c.elevenlabs_voice_id || "",
-    ownerId: c.owner_id || null,
-    lecturerName: c.lecturer_name || "",
-    lecturerPersona: c.lecturer_persona || "",
-    lecturerStyleNote: c.lecturer_style_note || "",
-    modules: moduleRows
-      .filter((m) => m.course_id === c.id)
-      .map((m) => ({
-        id: m.id,
-        unit: m.unit,
-        durationMinutes: m.duration_minutes,
-        pace: m.pace,
-        allowLiveCode: m.allow_live_code,
-        slides: m.slides,
-        createdAt: new Date(m.created_at).getTime(),
-      })),
-  }));
+  return rowsToCourses(courseRows, moduleRows);
 }
 
 async function saveCourseToSupabase(course, accessToken) {
@@ -578,7 +566,7 @@ async function flagQuestionForLecturer(courseId, moduleId, studentName, question
 }
 
 async function fetchFlaggedQuestions(courseId, accessToken) {
-  return supabaseRequest(`/flagged_questions?course_id=eq.${encodeURIComponent(courseId)}&select=*&order=created_at.desc`, {}, accessToken);
+  return rowList(await supabaseRequest(`/flagged_questions?course_id=eq.${encodeURIComponent(courseId)}&select=*&order=created_at.desc`, {}, accessToken));
 }
 
 async function resolveFlaggedQuestion(flagId, accessToken) {
@@ -703,26 +691,26 @@ async function recordSession(session, accessToken) {
 
 // Quiz answers and the help given around them, for the "what helped students recover" panel.
 async function fetchCourseLearningEvents(courseId, accessToken) {
-  return supabaseRequest(
+  return rowList(await supabaseRequest(
     `/learning_events?course_id=eq.${encodeURIComponent(courseId)}&event_type=in.(check_answer,adapt_applied,adapt_request,signal)&select=session_id,student_id,student_key,event_type,slide_index,created_at,payload&order=created_at.asc&limit=1000`,
     {},
     accessToken
-  );
+  ));
 }
 
 async function fetchSessions(courseId, accessToken) {
-  return supabaseRequest(`/sessions?course_id=eq.${encodeURIComponent(courseId)}&select=*&order=ended_at.desc`, {}, accessToken);
+  return rowList(await supabaseRequest(`/sessions?course_id=eq.${encodeURIComponent(courseId)}&select=*&order=ended_at.desc`, {}, accessToken));
 }
 
 // A signed-in student's own session history — embeds the course's code/
 // title/institution via PostgREST's foreign-table syntax so the history
 // view doesn't need a second round trip per session to make sense of it.
 async function fetchMySessions(studentId, accessToken) {
-  return supabaseRequest(
+  return rowList(await supabaseRequest(
     `/sessions?student_id=eq.${encodeURIComponent(studentId)}&select=*,courses(code,title,institution)&order=ended_at.desc`,
     {},
     accessToken
-  );
+  ));
 }
 
 // ---------------------------------------------------------------------------
@@ -801,7 +789,8 @@ const GEMINI_MODEL_STRONG = "gemini-3.5-flash";
 // Every AI call is timed (duration only, never the text) so slow spots show up in data.
 async function callAI(systemPrompt, userPrompt, maxTokens, model, kind = "ai") {
   const t0 = performance.now();
-  const meta = {};
+  // Writing a whole lecture or notes can legitimately take a while; a live answer should not.
+  const meta = { timeoutMs: ["generate", "notes", "summary"].includes(kind) ? 150000 : 35000 };
   try {
     const text = await callAIRaw(systemPrompt, userPrompt, maxTokens, model, meta);
     logTiming(kind, { provider: meta.provider, model: meta.model || model || "default", ok: true, status: meta.status, client_ms: performance.now() - t0, server_ms: meta.serverMs, chars: text.length });
@@ -816,17 +805,27 @@ async function callAIRaw(systemPrompt, userPrompt, maxTokens, model, meta) {
   if (!AI_PROXY_URL) {
     throw new Error("AI_PROXY_URL isn't configured — deploy the Edge Function and set it near the top of App.jsx.");
   }
-  const response = await fetch(AI_PROXY_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      // The proxy is a Supabase Edge Function, which requires a valid
-      // project JWT to invoke — the anon key satisfies that.
-      ...(SUPABASE_ANON_KEY ? { Authorization: `Bearer ${SUPABASE_ANON_KEY}`, apikey: SUPABASE_ANON_KEY } : {}),
-    },
-    body: JSON.stringify({ system: systemPrompt, prompt: userPrompt, ...(maxTokens ? { maxTokens } : {}), ...(model ? { model } : {}) }),
-  });
-  const data = await response.json();
+  let response;
+  let data;
+  try {
+    ({ response, data } = await withTimeout(async (signal) => {
+      const r = await fetch(AI_PROXY_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          // The proxy is a Supabase Edge Function, which requires a valid
+          // project JWT to invoke — the anon key satisfies that.
+          ...(SUPABASE_ANON_KEY ? { Authorization: `Bearer ${SUPABASE_ANON_KEY}`, apikey: SUPABASE_ANON_KEY } : {}),
+        },
+        body: JSON.stringify({ system: systemPrompt, prompt: userPrompt, ...(maxTokens ? { maxTokens } : {}), ...(model ? { model } : {}) }),
+        signal,
+      });
+      return { response: r, data: await r.json() };
+    }, (meta && meta.timeoutMs) || 35000));
+  } catch (e) {
+    if (e && e.timeout) { meta.status = 0; e.message = "The AI took too long to answer."; }
+    throw e;
+  }
   return interpretAIJson(response, data, meta);
 }
 
@@ -867,7 +866,14 @@ async function callAIStream(systemPrompt, userPrompt, { onText, kind = "qa_strea
   const meta = {};
   let text = "";
   let firstMs = null;
+  // A stalled connection must never freeze the lecturer: give up if nothing arrives for a while (20 s for the first
+  // piece, 12 s between pieces) or if the whole answer takes over a minute. Anything that already arrived is still used.
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  let idleTimer = null;
+  const arm = (ms) => { clearTimeout(idleTimer); if (controller) idleTimer = setTimeout(() => controller.abort(), ms); };
+  const hardTimer = controller ? setTimeout(() => controller.abort(), 60000) : null;
   try {
+    arm(20000);
     const response = await fetch(AI_PROXY_URL, {
       method: "POST",
       headers: {
@@ -875,6 +881,7 @@ async function callAIStream(systemPrompt, userPrompt, { onText, kind = "qa_strea
         ...(SUPABASE_ANON_KEY ? { Authorization: `Bearer ${SUPABASE_ANON_KEY}`, apikey: SUPABASE_ANON_KEY } : {}),
       },
       body: JSON.stringify({ system: systemPrompt, prompt: userPrompt, stream: true }),
+      ...(controller ? { signal: controller.signal } : {}),
     });
     const ct = (response.headers && typeof response.headers.get === "function" && response.headers.get("content-type")) || "";
     if (!/text\/event-stream/i.test(ct) || !response.body || typeof response.body.getReader !== "function") {
@@ -891,6 +898,7 @@ async function callAIStream(systemPrompt, userPrompt, { onText, kind = "qa_strea
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
+      arm(12000);
       for (const ev of parser.push(decoder.decode(value, { stream: true }))) {
         if (typeof ev.t === "string") {
           text += ev.t;
@@ -909,8 +917,11 @@ async function callAIStream(systemPrompt, userPrompt, { onText, kind = "qa_strea
   } catch (e) {
     if (text.trim()) return text.trim(); // some of the answer arrived: use it
     logTiming(kind, { provider: meta.provider, ok: false, status: meta.status || 0, client_ms: performance.now() - t0 });
+    if (e && e.name === "AbortError") { const err = new Error("The AI took too long to answer."); err.timeout = true; throw err; }
     throw e;
   } finally {
+    clearTimeout(idleTimer);
+    clearTimeout(hardTimer);
     if (text.trim()) logTiming(kind, { provider: meta.provider, model: meta.model, ok: true, status: meta.status, client_ms: performance.now() - t0, first_chunk_ms: firstMs, server_ms: meta.serverMs, chars: text.length });
   }
 }
@@ -2171,7 +2182,7 @@ function ModuleSetupScreen({ course, setup, patchSetup, onSaveModule, onSaveAndP
               <div className="slide-card" key={i}>
                 <div className="slide-card-head">
                   <span className="sk-type-chip" title="Slide type">{TYPE_LABELS[s.type] || "Concept"}</span>
-                  <input className="slide-card-title" aria-label={`Slide ${i + 1} title`} value={s.title} onChange={(e) => editSlide(i, { title: e.target.value })} />
+                  <input className="slide-card-title" aria-label={`Slide ${i + 1} title`} value={typeof s.title === "string" ? s.title : ""} onChange={(e) => editSlide(i, { title: e.target.value })} />
                   <button className="icon-btn" onClick={() => moveSlide(i, -1)} disabled={i === 0} title="Move slide up" aria-label={`Move slide up: ${s.title}`}>↑</button>
                   <button className="icon-btn" onClick={() => moveSlide(i, 1)} disabled={i === draft.slides.length - 1} title="Move slide down" aria-label={`Move slide down: ${s.title}`}>↓</button>
                   <button className="icon-btn" onClick={() => removeSlide(i)} title="Remove slide" aria-label={`Remove slide: ${s.title}`}><Trash2 size={14} /></button>
@@ -2179,7 +2190,7 @@ function ModuleSetupScreen({ course, setup, patchSetup, onSaveModule, onSaveAndP
                 <textarea
                   className="slide-card-bullets"
                   rows={3}
-                  value={s.bullets.join("\n")}
+                  value={(Array.isArray(s.bullets) ? s.bullets : []).join("\n")}
                   onChange={(e) => editSlide(i, { bullets: e.target.value.split("\n") })}
                   placeholder="One bullet per line…"
                   aria-label={`Slide ${i + 1} bullets, one per line`}
@@ -2676,12 +2687,12 @@ function MyHistoryScreen({ session, courses, onBack, onAccountDeleted, onOpenLeg
         {practice && practice.loading && <div className="empty-hint"><Loader2 className="spin" size={14} /> Writing practice questions for “{practice.concept}”…</div>}
         {practice && practice.error && <div className="setup-error"><AlertTriangle size={13} /> {practice.error} <button className="skip-link inline" onClick={() => setPractice(null)}>Close</button></div>}
         {practice && practice.questions ? (
-          <PracticePanel concept={practice.concept} questions={practice.questions} onAnswer={recordPractice} onClose={() => { setPractice(null); setReloadTick((n) => n + 1); }} />
+          <Boundary label="practice" title="Practice couldn’t be shown."><PracticePanel concept={practice.concept} questions={practice.questions} onAnswer={recordPractice} onClose={() => { setPractice(null); setReloadTick((n) => n + 1); }} /></Boundary>
         ) : learning === null ? (
           <div className="empty-hint"><Loader2 className="spin" size={14} /> Loading…</div>
         ) : (
           <>
-            <MasteryPanel mastery={liveMastery} revise={conceptsToRevise(liveMastery, 3)} calibration={learning.calibration} notes={notes} onNote={setNote} onPractice={startPractice} />
+            <Boundary label="mastery" title="Your progress panel couldn’t be shown."><MasteryPanel mastery={liveMastery} revise={conceptsToRevise(liveMastery, 3)} calibration={learning.calibration} notes={notes} onNote={setNote} onPractice={startPractice} /></Boundary>
             {notesError && <div className="setup-error" role="alert"><AlertTriangle size={13} /> {notesError}</div>}
           </>
         )}
@@ -2895,7 +2906,7 @@ function SlideAnalyticsBody({ course, session }) {
     setError("");
     const call = (fn) => supabaseRequest(`/rpc/${fn}`, { method: "POST", body: JSON.stringify({ p_module_id: moduleId }) }, session && session.accessToken);
     Promise.all([call("module_slide_stats"), call("module_check_breakdown")])
-      .then(([r, b]) => { if (!cancelled) { setRows(Array.isArray(r) ? r : []); setBreakdown(Array.isArray(b) ? b : []); } })
+      .then(([r, b]) => { if (!cancelled) { setRows(rowList(r)); setBreakdown(rowList(b)); } })
       .catch((e) => { if (!cancelled) { setError(e.message || "Couldn't load slide analytics."); setRows([]); } });
     return () => { cancelled = true; };
   }, [moduleId, session]);
@@ -3053,7 +3064,7 @@ function CourseInsightsScreen({ course, session, runAuthed, onBack }) {
   }, [load]);
 
   const loadStudentRows = useCallback(
-    (moduleId) => authed((t) => supabaseRequest("/rpc/module_student_roster", { method: "POST", body: JSON.stringify({ p_module_id: moduleId }) }, t)),
+    (moduleId) => authed(async (t) => rowList(await supabaseRequest("/rpc/module_student_roster", { method: "POST", body: JSON.stringify({ p_module_id: moduleId }) }, t))),
     [authed]
   );
 
@@ -3105,10 +3116,10 @@ function CourseInsightsScreen({ course, session, runAuthed, onBack }) {
             </div>
           )}
 
-          <SlideAnalyticsPanel course={course} session={session} />
-          <RosterPanel course={course} loadRows={loadStudentRows} />
-          <TeachingEffectPanel loadRows={loadTeachingEvents} />
-          <FeelPanel loadRows={loadTeachingEvents} />
+          <Boundary label="slide-analytics" title="Slide analytics couldn’t be shown."><SlideAnalyticsPanel course={course} session={session} /></Boundary>
+          <Boundary label="roster" title="The class roster couldn’t be shown."><RosterPanel course={course} loadRows={loadStudentRows} /></Boundary>
+          <Boundary label="teaching-effect" title="The teaching-effect panel couldn’t be shown."><TeachingEffectPanel loadRows={loadTeachingEvents} /></Boundary>
+          <Boundary label="feel" title="The lecture-feel summary couldn’t be shown."><FeelPanel loadRows={loadTeachingEvents} /></Boundary>
 
           <div className="flag-section">
             <div className="flag-section-title">Sessions</div>
@@ -3170,7 +3181,7 @@ function CourseInsightsScreen({ course, session, runAuthed, onBack }) {
               <div className="flag-section-title">Needs review ({unresolvedFlags.length})</div>
               <div className="flag-list">
                 {unresolvedFlags.map((f) => (
-                  <FlagReviewCard key={f.id} f={f} onResolve={markResolved} onApprove={approveFlag} />
+                  <Boundary key={f.id} label="flag-card" title="This question couldn’t be shown."><FlagReviewCard f={f} onResolve={markResolved} onApprove={approveFlag} /></Boundary>
                 ))}
               </div>
             </div>
@@ -3225,7 +3236,33 @@ class SlideBoundary extends React.Component {
 }
 
 export { LectureRoom, AuthScreen, JoinScreen, LecturerDashboard, ModuleSetupScreen };
-function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, studentSession, researchConsent, shareWithLecturer, role, onLeave, onEditSession }) {
+// A module with no slides (nothing saved yet, or its slide data was damaged) cannot be taught. Show a plain
+// explanation instead of letting the lecture room fall over.
+function EmptyLecture({ role, onLeave, onEdit }) {
+  return (
+    <div role="status" style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: 24, textAlign: "center", color: "#EDEFF2" }}>
+      <div style={{ maxWidth: 380 }}>
+        <h2 style={{ fontSize: 18, margin: "0 0 8px" }}>This module has no slides yet</h2>
+        <p style={{ color: "#8890A0", fontSize: 14, lineHeight: 1.5, margin: "0 0 16px" }}>
+          {role === "lecturer" ? "Add some slides to it, then preview it again." : "Your lecturer hasn’t finished it. Please try another module, or check back later."}
+        </p>
+        <div style={{ display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap" }}>
+          {role === "lecturer" && onEdit && (
+            <button type="button" className="nav-btn" onClick={onEdit}>Back to dashboard</button>
+          )}
+          <button type="button" className="nav-btn" onClick={onLeave}>Leave</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function LectureRoom(props) {
+  if (!hasSlides(props.curriculum)) return <EmptyLecture role={props.role} onLeave={props.onLeave} onEdit={props.onEditSession} />;
+  return <LectureRoomInner {...props} />;
+}
+
+function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentName, studentSession, researchConsent, shareWithLecturer, role, onLeave, onEditSession }) {
   const [slideIndex, setSlideIndex] = useState(0);
   // bumped whenever the student jumps to another slide by hand, so teaching work still in flight for the slide they left can tell it is out of date
   const navTokenRef = useRef(0);
@@ -3773,6 +3810,8 @@ function LectureRoom({ curriculum, settings, courseId, moduleId, studentName, st
       setAiNotice(
         e && e.rateLimited
           ? "The AI lecturer is getting a lot of requests right now — using a fallback line until it clears up."
+          : e && e.timeout
+          ? "The AI lecturer is taking too long to answer — using a fallback line."
           : "Had trouble reaching the AI lecturer just now — using a fallback line."
       );
       return fallback;
@@ -4818,7 +4857,8 @@ ${NATURAL_SPEECH_STYLE}`;
         </div>
       </div>
       {moreOpen && <div className="topbar-scrim" onClick={() => setMoreOpen(false)} />}
-      <StylePanel open={styleOpen} onClose={() => setStyleOpen(false)} prefs={stylePrefs} onChange={updateStylePrefs} lecturerName={resolvePersona(personaCourse).name} />
+      <Boundary label="style-panel" title="The style panel couldn’t be shown."><StylePanel open={styleOpen} onClose={() => setStyleOpen(false)} prefs={stylePrefs} onChange={updateStylePrefs} lecturerName={resolvePersona(personaCourse).name} /></Boundary>
+      <Boundary label="voice-panel" title="Voice settings couldn’t be shown.">
       <VoicePanel
         open={voiceOpen}
         onClose={() => setVoiceOpen(false)}
@@ -4829,6 +4869,7 @@ ${NATURAL_SPEECH_STYLE}`;
         canPreview={paused || lecturerState === "idle"}
         onPreview={previewVoice}
       />
+      </Boundary>
 
       {ttsNotice && (
         <div className={`tts-notice ${audioBlocked ? "clickable" : ""}`} onClick={audioBlocked ? enableAudio : undefined}>
@@ -5222,12 +5263,13 @@ export default function SEMAIApp() {
         // no connection: open the lectures saved on this device last time
         loadCoursesSnapshot(offlineStore()).then((snap) => {
           if (cancelled) return;
-          if (snap) {
-            setCourses(snap.courses);
+          const saved = snap ? cleanCourseList(snap.courses) : [];
+          if (saved.length) {
+            setCourses(saved);
             setOfflineSavedAt(snap.savedAt);
             setDbStatus("offline");
           } else setDbStatus("error");
-        });
+        }).catch(() => { if (!cancelled) setDbStatus("error"); });
       });
     return () => {
       cancelled = true;
@@ -5465,6 +5507,7 @@ export default function SEMAIApp() {
     <>
       <GlobalStyles />
       <main>
+      <Boundary variant="screen" label={`screen:${stage}`} resetKey={stage} exitLabel="Go to start" onExit={() => { setRoomData(null); setStage("role"); }}>
       {stage === "role" && (
         <RoleSelectScreen
           onOpenLegal={openLegal}
@@ -5568,6 +5611,7 @@ export default function SEMAIApp() {
           onEditSession={role === "lecturer" ? () => setStage("dashboard") : null}
         />
       )}
+      </Boundary>
       </main>
     </>
   );

@@ -227,3 +227,12 @@ When a student's question is best answered by showing something, the AI lecturer
 - **Kill switch:** `localStorage.setItem("semai_detours", "off")` in a browser disables it there (the AI prompt reverts to the old one).
 - **Analytics:** `ai_answer` events gain an optional `visual` field in their payload (no schema change).
 - **Tests:** `npm test` runs `.tests/t_detour.mjs` (parser/builder/validation), `t_detour_controller.mjs` (timing, pinning, new-question races) and `t_detour_render.mjs` (real React render of every board kind).
+
+## Robustness (never take the app down)
+
+- **Data guards** (`src/dataGuards.js`): anything from the database or the on-device copy is re-shaped before use, so a bad row, a module with null/odd slides, or an object where a list was expected cannot crash a screen.
+- **Safe storage** (`src/safeStorage.js`): browsers can throw just from touching `localStorage`/`indexedDB`; every default now goes through these helpers.
+- **Timeouts** (`src/net.js`): AI, database, sign-in and account calls all have deadlines (AI streaming has first-byte and idle timeouts), so a stalled connection never freezes the lecturer or a screen.
+- **Boundaries** (`Boundary` in `src/errorLogging.jsx`): a crash is contained to one screen or one panel, with "Try again"; the root boundary is the last resort. A module with no slides shows a plain message instead of opening the lecture room.
+- **Start-up fallback** (`index.html`): if the app script fails to load, a plain "trouble starting" message with Reload replaces the blank page.
+- **Tests:** `npm test` covers the guards, timeouts and safe storage; `.tests/e2e/` has the optional browser fault-injection and random-click tests (see its README).

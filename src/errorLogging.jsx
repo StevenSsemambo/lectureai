@@ -125,12 +125,73 @@ export class ErrorBoundary extends React.Component {
             SEMAI hit an unexpected problem. It has been logged. Reloading usually fixes it, and your account and saved courses are not affected.
           </p>
           <button
+            onClick={() => this.setState({ crashed: false })}
+            style={{ background: "transparent", color: "#EDEFF2", border: "1px solid #3A4556", borderRadius: 8, padding: "10px 18px", fontSize: 14, fontWeight: 600, cursor: "pointer", marginRight: 8 }}
+          >
+            Try again
+          </button>
+          <button
             onClick={() => window.location.reload()}
             style={{ background: "#EDEFF2", color: "#14181C", border: "none", borderRadius: 8, padding: "10px 18px", fontSize: 14, fontWeight: 600, cursor: "pointer" }}
           >
             Reload
           </button>
         </div>
+      </div>
+    );
+  }
+}
+
+// A smaller safety net than the root ErrorBoundary: it contains a crash to ONE screen or ONE panel, so the
+// rest of the app keeps working and the person is never forced to reload.
+//   variant "screen": a whole screen failed -> message + Try again (+ optional exit button)
+//   variant "panel":  one section failed     -> compact notice in its place + Try again
+// `resetKey` changes (e.g. the person navigates elsewhere) clear the error automatically.
+export class Boundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { crashed: false };
+  }
+
+  static getDerivedStateFromError() {
+    return { crashed: true };
+  }
+
+  componentDidCatch(error, info) {
+    logClientError(this.props.variant === "screen" ? "react.screen" : "react.panel", error, {
+      label: clip(this.props.label, 80),
+      componentStack: clip(info && info.componentStack, 1500),
+    });
+  }
+
+  componentDidUpdate(prevProps) {
+    if (this.state.crashed && prevProps.resetKey !== this.props.resetKey) this.setState({ crashed: false });
+  }
+
+  render() {
+    if (!this.state.crashed) return this.props.children;
+    const retry = () => this.setState({ crashed: false });
+    const btn = { background: "transparent", color: "#EDEFF2", border: "1px solid #3A4556", borderRadius: 8, padding: "7px 14px", fontSize: 13, fontWeight: 600, cursor: "pointer" };
+    if (this.props.variant === "screen") {
+      return (
+        <div role="alert" style={{ minHeight: 360, display: "flex", alignItems: "center", justifyContent: "center", padding: 24, color: "#EDEFF2", textAlign: "center", fontFamily: "Inter, system-ui, sans-serif" }}>
+          <div style={{ maxWidth: 380 }}>
+            <h2 style={{ fontSize: 18, margin: "0 0 8px" }}>This screen ran into a problem</h2>
+            <p style={{ color: "#8890A0", fontSize: 14, lineHeight: 1.5, margin: "0 0 16px" }}>It has been logged. Your account and saved courses are not affected.</p>
+            <button type="button" onClick={retry} style={btn}>Try again</button>
+            {this.props.onExit && (
+              <button type="button" onClick={() => { this.props.onExit(); this.setState({ crashed: false }); }} style={{ ...btn, marginLeft: 8, background: "#EDEFF2", color: "#14181C", border: "none" }}>
+                {this.props.exitLabel || "Go back"}
+              </button>
+            )}
+          </div>
+        </div>
+      );
+    }
+    return (
+      <div role="alert" style={{ margin: "10px 0", padding: "12px 14px", border: "1px solid #3A4556", borderRadius: 10, background: "#1A1F27", color: "#C7CCD4", fontSize: 13, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <span style={{ flex: "1 1 200px" }}>{this.props.title || "This section couldn’t be shown."} The rest of the page still works.</span>
+        <button type="button" onClick={retry} style={btn}>Try again</button>
       </div>
     );
   }
