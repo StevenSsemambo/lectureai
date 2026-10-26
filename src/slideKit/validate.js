@@ -12,7 +12,6 @@ import { verifyStep, compileFunction } from "./mathVerify.js";
 export async function checkMermaid(code) {
   try {
     const { default: mermaid } = await import("mermaid");
-    mermaid.initialize({ startOnLoad: false, securityLevel: "strict" });
     await mermaid.parse(code);
     return null;
   } catch (e) {

@@ -1,3 +1,4 @@
+import { withMermaid } from "./mermaidConfig.js";
 // Helpers that turn slide visuals into PNGs for the notes PDF. Every function
 // is best-effort: if a browser can't rasterise something, the caller falls back
 // to a text description instead of failing the whole download.
@@ -44,13 +45,12 @@ let counter = 0;
 // would taint the canvas). The init directive is per-diagram so it can't disturb
 // the dark theme used on screen.
 export async function diagramToSvgLight(code) {
-  const mermaid = (await import("mermaid")).default;
-  const directive = '%%{init: {"theme":"base","htmlLabels":false,"fontFamily":"Helvetica, Arial, sans-serif","flowchart":{"htmlLabels":false,"useMaxWidth":false},"state":{"htmlLabels":false},"class":{"htmlLabels":false},"themeVariables":{"primaryColor":"#e6f2ec","primaryBorderColor":"#256344","primaryTextColor":"#191c20","lineColor":"#3f4650","secondaryColor":"#fdf3df","tertiaryColor":"#eef1f4","fontFamily":"Helvetica, Arial, sans-serif","fontSize":"16px"}}}%%\n';
   const id = `sk-pdf-${++counter}`;
+  // With plain SVG labels Mermaid strips a bare < or >, so write them as entity codes inside quoted labels.
+  const safe = String(code).replace(/"([^"\n]*)"/g, (m, t) => `"${t.replace(/>/g, "#gt;").replace(/</g, "#lt;")}"`);
   try {
-    // With plain SVG labels Mermaid strips a bare < or >, so write them as entity codes inside quoted labels.
-    const safe = String(code).replace(/"([^"\n]*)"/g, (m, t) => `"${t.replace(/>/g, "#gt;").replace(/</g, "#lt;")}"`);
-    const { svg } = await mermaid.render(id, directive + safe);
+    // Light PDF settings, applied for this render only (the on-screen dark theme is restored for the next screen render).
+    const { svg } = await withMermaid("pdf", (mermaid) => mermaid.render(id, safe));
     return svg;
   } finally {
     const stray = document.getElementById(`d${id}`) || document.getElementById(id);
