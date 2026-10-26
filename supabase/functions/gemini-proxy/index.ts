@@ -11,6 +11,9 @@
 // client-side callAI() in the app has one shape to parse regardless of
 // which model is actually answering.
 //
+// v14: a live (default-model) call has a deadline of 9 s for Gemini to START answering; if it is slower, the backup
+// provider answers straight away instead of the lecturer waiting. Authoring calls (strong model) stay patient.
+//
 // v10: {"stream": true} answers as a server-sent-event stream (data: {"t": "text piece"} ... data: {"done": true, ...})
 // so the app can start speaking before the whole answer exists. Errors BEFORE the stream starts use the same JSON
 // replies as before, and callers that do not ask for a stream are unaffected.
@@ -297,19 +300,29 @@ Deno.serve(async (req) => {
     // model fall back once to the default model; if Gemini still can't answer
     // (5xx, 429 or unreachable) hand the request to Groq when a key is configured.
     const TRANSIENT = [500, 502, 503, 504];
+    const LIVE_DEADLINE_MS = 9000;
     const callGemini = async (id: string, attempts: number, pauseMs: number): Promise<Response | null> => {
       let r: Response | null = null;
       for (let attempt = 0; attempt < attempts; attempt++) {
         if (attempt) await new Promise((resolve) => setTimeout(resolve, attempt * pauseMs));
+        // A live lecture call must not sit waiting on a slow Gemini: give it a deadline for the response to START
+        // (headers; with streaming that is the first piece), then use the backup provider. Authoring calls stay patient.
+        const controller = new AbortController();
+        const deadline = id === GEMINI_MODEL_STRONG ? null : setTimeout(() => controller.abort(), LIVE_DEADLINE_MS);
         try {
           r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${id}:${wantStream ? "streamGenerateContent?alt=sse" : "generateContent"}`, {
             method: "POST",
             headers: { "Content-Type": "application/json", "x-goog-api-key": GEMINI_API_KEY },
             body: bodyJson,
+            signal: controller.signal,
           });
+          if (deadline) clearTimeout(deadline); // answered in time; a long stream may keep flowing
         } catch (e) {
+          if (deadline) clearTimeout(deadline);
           r = null; // network failure / timeout: treat like a transient error
-          console.error(`Gemini ${id} unreachable (attempt ${attempt + 1}/${attempts}): ${String(e).slice(0, 120)}`);
+          const slow = controller.signal.aborted;
+          console.error(`Gemini ${id} ${slow ? `too slow (> ${LIVE_DEADLINE_MS} ms)` : "unreachable"} (attempt ${attempt + 1}/${attempts}): ${String(e).slice(0, 120)}`);
+          if (slow && GROQ_API_KEY) return null; // do not wait for a second slow try: the backup answers now
           continue;
         }
         if (!TRANSIENT.includes(r.status)) return r;
