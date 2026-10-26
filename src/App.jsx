@@ -31,6 +31,7 @@ import { createConversation, recordExchange, conversationBlock, avoidOpenings } 
 import { extractAnswer, createChunker, createSSEParser, trimToSentence, continuesFrom } from "./persona/streaming.js";
 import { milestoneFor, milestoneLine, MAX_MILESTONES_PER_LECTURE } from "./persona/milestones.js";
 import { FEEL_CHOICES, feelThanks } from "./persona/feel.js";
+import { speakWithBrowserVoice, remainingFrom } from "./voice/speech.js";
 import { loadPrefs as loadVoicePrefs, savePrefs as saveVoicePrefs, chooseVoice, clampRate } from "./voice/voicePrefs.js";
 import { createSessionManager, SessionExpiredError } from "./authSession.js";
 import { offlineStore } from "./offline/store.js";
@@ -3512,6 +3513,8 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
 
   const stateRef = useRef("idle");
   const interruptedRef = useRef(false);
+  // Bumped whenever speech is stopped or a new line starts, so an older line can never keep talking over a newer one.
+  const speechGenRef = useRef(0);
   const slideIndexRef = useRef(0);
   const autopilotEnabledRef = useRef(true);
   const autopilotRunningRef = useRef(false);
@@ -3794,6 +3797,7 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
   // so callers would otherwise hang waiting for one).
   const stopSpeaking = useCallback(() => {
     interruptedRef.current = true;
+    speechGenRef.current += 1;
     window.speechSynthesis && window.speechSynthesis.cancel();
     if (audioRef.current) {
       audioRef.current.pause();
@@ -3835,12 +3839,18 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
         onStart && onStart();
       };
       interruptedRef.current = false;
+      const myGen = ++speechGenRef.current;
+      const stillMine = () => speechGenRef.current === myGen && !navMoved();
+      let speakText = text; // what the browser voice has to say (all of it, or what a dropped recording did not finish)
       lastSpokenTextRef.current = text;
 
       if (settings.voiceProvider === "elevenlabs" && settings.elevenLabsApiKey) {
         const voiceId = settings.elevenLabsVoiceId || "21m00Tcm4TlvDq8ikWAM"; // ElevenLabs default "Rachel" voice
         try {
+          // a weak connection must not freeze the lecture: give the download a deadline, then use the browser voice
+          const blob = await withTimeout(async (signal) => {
           const res = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
+            signal,
             method: "POST",
             headers: { "xi-api-key": settings.elevenLabsApiKey, "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -3855,7 +3865,8 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
             }),
           });
           if (!res.ok) throw new Error(`ElevenLabs request failed (${res.status})`);
-          const blob = await res.blob();
+          return await res.blob();
+          }, 20000);
           if (navMoved()) return false;
           const fetchMs = Math.round(performance.now() - tSpeak); // the whole sentence is downloaded before playback begins
           const url = URL.createObjectURL(blob);
@@ -3864,6 +3875,7 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
           try { audio.preservesPitch = true; } catch (e) { /* older browsers */ }
           audioRef.current = audio;
           setTtsNotice("");
+          let watchdog = null;
           const result = await new Promise((resolve, reject) => {
             activeResolveRef.current = resolve;
             audio.onloadedmetadata = () => {
@@ -3871,17 +3883,33 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
             };
             audio.onplaying = () => markStart("elevenlabs", { fetch_ms: fetchMs });
             audio.onended = () => resolve(true);
-            audio.onerror = () => resolve(false);
+            // a broken recording is not a student interruption: say "fail" so the browser voice takes over
+            audio.onerror = () => resolve(stillMine() ? "fail" : false);
+            // Watch the playback. The phone can pause it (a call, Bluetooth, another app) or it can freeze mid-way.
+            let lastTime = -1, stuck = 0;
+            watchdog = setInterval(() => {
+              if (!stillMine()) { clearInterval(watchdog); return; }
+              if (audio.ended) return;
+              if (audio.paused) { audio.play().catch(() => {}); }
+              if (audio.currentTime === lastTime) stuck += 1; else { stuck = 0; lastTime = audio.currentTime; }
+              if (stuck >= 8) { clearInterval(watchdog); resolve("fail"); } // about 4 seconds without moving
+            }, 500);
             // A rejected play() here is almost always the browser's autoplay
             // policy blocking audio that wasn't triggered by a direct click
             // — surface it instead of resolving silently, so the caller's
             // catch block below can show the "tap to enable" affordance.
             audio.play().catch((err) => reject(err));
           });
+          if (watchdog) clearInterval(watchdog);
+          const heardFraction = audio.duration && isFinite(audio.duration) ? audio.currentTime / audio.duration : 0;
           URL.revokeObjectURL(url);
           activeResolveRef.current = null;
           audioRef.current = null;
-          return result;
+          if (result !== "fail") return result;
+          try { audio.pause(); } catch (e) { /* already gone */ }
+          setTtsNotice("The lecturer's voice connection dropped — carrying on with the browser voice for this line.");
+          speakText = remainingFrom(text, heardFraction);
+          if (!speakText) return true;
         } catch (e) {
           const blockedByAutoplay = e && (e.name === "NotAllowedError" || e.name === "NotSupportedError");
           setTtsNotice(
@@ -3897,20 +3925,26 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
         }
       }
 
-      onDurationKnown && onDurationKnown(estimateSpeechDurationMs(text));
+      onDurationKnown && onDurationKnown(estimateSpeechDurationMs(speakText));
       if (!window.speechSynthesis) return true;
-      window.speechSynthesis.cancel();
+      // Spoken in short watched pieces (see voice/speech.js): a long paragraph in one go is cut off by Chrome after ~15 s,
+      // and a dropped piece used to leave the lecture "talking" in silence.
       return new Promise((resolve) => {
         activeResolveRef.current = resolve;
-        const u = new SpeechSynthesisUtterance(text);
-        u.rate = voicePrefsRef.current.rate || 1;
-        u.pitch = 1;
         const chosen = chooseVoice(window.speechSynthesis.getVoices(), voicePrefsRef.current, (typeof navigator !== "undefined" && navigator.language) || "en");
-        if (chosen) { try { u.voice = chosen; u.lang = chosen.lang; } catch (e) { /* unusable voice: keep the default */ } }
-        u.onstart = () => markStart("browser");
-        u.onend = () => resolve(true);
-        utteranceRef.current = u;
-        window.speechSynthesis.speak(u);
+        speakWithBrowserVoice(window.speechSynthesis, SpeechSynthesisUtterance, speakText, {
+          rate: voicePrefsRef.current.rate || 1,
+          voice: chosen,
+          onStart: () => markStart("browser"),
+          shouldStop: () => !stillMine(),
+          onTrouble: (kind) => {
+            logTiming("tts_trouble", { provider: "browser", client_ms: Math.round(performance.now() - tSpeak), chars: text.length, extra: { kind } });
+            if (kind === "gave-up") setTtsNotice("The browser voice stopped responding, so the lecturer is continuing on screen. Reloading the page usually brings it back.");
+          },
+        }).then((finished) => {
+          if (activeResolveRef.current === resolve) activeResolveRef.current = null;
+          resolve(finished);
+        });
       });
     },
     [settings.voiceProvider, settings.elevenLabsApiKey, settings.elevenLabsVoiceId]
