@@ -44,14 +44,14 @@ function DefinitionCard({ d, focusId }) {
   );
 }
 
-function DataTable({ table, focusId }) {
+function DataTable({ table, focusId, focusCells }) {
   return (
     <div className="sk-table-wrap">
       <table className="sk-table">
         <thead><tr>{table.headers.map((h, i) => <th key={i} scope="col"><Rich text={h} /></th>)}</tr></thead>
         <tbody>
           {table.rows.map((r, i) => (
-            <tr key={i} data-sk-block={`row:${i}`} className={fc(focusId, `row:${i}`)}>{r.map((c, j) => (j === 0 ? <th key={j} scope="row"><Rich text={c} /></th> : <td key={j}><Rich text={c} /></td>))}</tr>
+            <tr key={i} data-sk-block={`row:${i}`} className={fc(focusId, `row:${i}`)}>{r.map((c, j) => (j === 0 ? <th key={j} scope="row"><Rich text={c} /></th> : <td key={j} className={focusId === `row:${i}` && focusCells && focusCells.includes(j) ? "sk-cell-focus" : undefined}><Rich text={c} /></td>))}</tr>
           ))}
         </tbody>
       </table>
@@ -118,7 +118,7 @@ function Summary({ slide, focusId }) {
   );
 }
 
-export default function SlideView({ slide, unit, index, total, revealCount = Infinity, showWarnings = false, footer = null, focusId = null, hideCounter = false }) {
+export default function SlideView({ slide, unit, index, total, revealCount = Infinity, showWarnings = false, footer = null, focusId = null, focusNodes = null, focusCells = null, hideCounter = false }) {
   const t = slide.type;
   const visual = slide.diagram || slide.plot;
   return (
@@ -132,14 +132,14 @@ export default function SlideView({ slide, unit, index, total, revealCount = Inf
       </header>
 
       {t === "definition" && slide.definition && <DefinitionCard d={slide.definition} focusId={focusId} />}
-      {t === "comparison" && slide.table && <DataTable table={slide.table} focusId={focusId} />}
+      {t === "comparison" && slide.table && <DataTable table={slide.table} focusId={focusId} focusCells={focusCells} />}
       {t === "worked_example" && slide.steps && <WorkedExample slide={slide} revealCount={revealCount} />}
       {t === "summary" ? <Summary slide={slide} focusId={focusId} /> : null}
 
       {visual && (
         <div className={slide.bullets && slide.bullets.length ? "sk-split" : ""}>
           <div className="sk-visual">
-            {slide.diagram && <div data-sk-block="diagram" className={fc(focusId, "diagram")}><DiagramView code={slide.diagram.code} caption={slide.diagram.caption} /></div>}
+            {slide.diagram && <div data-sk-block="diagram" className={fc(focusId, "diagram")}><DiagramView code={slide.diagram.code} caption={slide.diagram.caption} focusNodes={focusNodes} /></div>}
             {slide.plot && <div data-sk-block="plot" className={fc(focusId, "plot")}><PlotView plot={slide.plot} /></div>}
           </div>
           {slide.bullets && slide.bullets.length > 0 && <div className="sk-side"><Bullets items={slide.bullets} focusId={focusId} /></div>}

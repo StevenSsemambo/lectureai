@@ -107,6 +107,11 @@
 .sk-slide.sk-following [data-sk-block]:not(.sk-focus) { opacity: 0.74; transition: opacity 0.25s ease; }
 .sk-slide.sk-following li.sk-focus { padding-left: 8px; margin-left: -8px; }
 tr.sk-focus > th, tr.sk-focus > td { background: rgba(232, 163, 61, 0.12); }
+td.sk-cell-focus { background: rgba(232, 163, 61, 0.28); box-shadow: inset 0 -2px 0 #E8A33D; font-weight: 600; }
+.sk-diagram.has-node-focus g.node { opacity: 0.35; transition: opacity 0.25s ease; }
+.sk-diagram.has-node-focus g.node.sk-node-focus { opacity: 1; }
+.sk-diagram.has-node-focus g.node.sk-node-focus rect, .sk-diagram.has-node-focus g.node.sk-node-focus polygon, .sk-diagram.has-node-focus g.node.sk-node-focus circle, .sk-diagram.has-node-focus g.node.sk-node-focus path { stroke: #E8A33D !important; stroke-width: 3px !important; }
+@media (prefers-reduced-motion: reduce) { .sk-diagram.has-node-focus g.node { transition: none; } }
 @media (prefers-reduced-motion: reduce) { .sk-focus, .sk-slide.sk-following [data-sk-block]:not(.sk-focus) { transition: none; } }
 
 /* Comprehension check card */

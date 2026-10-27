@@ -61,7 +61,7 @@ export function extractBlocks(slide) {
 }
 
 // -> { id, confidence } or null when nothing is a clear match.
-export function matchSentenceToBlock(sentence, blocks, lastId = null) {
+export function matchSentenceToBlock(sentence, blocks, lastId = null, opts = {}) {
   const sTokens = [...new Set(tokens(sentence))];
   if (sTokens.length < 2 || !blocks.length) return null;
   const bTokens = blocks.map((b) => new Set(tokens(b.text)));
@@ -80,6 +80,7 @@ export function matchSentenceToBlock(sentence, blocks, lastId = null) {
     const precision = overlap / blockWeight; // how much of this block was mentioned
     let score = recall * 0.65 + Math.min(1, precision) * 0.35;
     if (lastIdx >= 0 && i >= lastIdx) score *= 1.08; // lectures tend to move forward through a slide
+    if (opts.rowBoost && b.id.startsWith("row:")) score *= opts.rowBoost; // while a table is walked through, its rows beat the bullets
     return { id: b.id, score, recall };
   }).sort((a, b) => b.score - a.score);
 
@@ -88,4 +89,54 @@ export function matchSentenceToBlock(sentence, blocks, lastId = null) {
   if (top.recall < 0.2) return null;
   if (!(top.score >= second * 1.25 || top.recall >= 0.5)) return null;
   return { id: top.id, confidence: Math.min(1, top.score) };
+}
+
+// ---- finer focus: nodes inside a diagram, cells inside a table row -------------------------------------------
+
+// Flowchart/graph nodes with their labels: [{ id, label, words }]. Other diagram kinds give [].
+// Words of a node label. Unlike tokens(), keywords such as "where" / "from" / "by" survive: they ARE the steps.
+const NODE_SKIP = new Set("the and for with into of to in is it its an a or on at as are be".split(" "));
+function nodeWords(text) {
+  return String(text || "").toLowerCase().replace(/^\s*\d+[.)]\s*/, "").replace(/[^a-z0-9+#\s]/g, " ").split(/\s+/)
+    .filter((w) => w.length > 1 && !/^\d+$/.test(w) && !NODE_SKIP.has(w)).map(stem);
+}
+
+export function diagramNodes(code) {
+  const src = String(code || "");
+  if (!/^\s*(flowchart|graph)\b/im.test(src)) return [];
+  const out = new Map();
+  const re = /(?:^|[\s;>&|-])([A-Za-z_][\w]*)\s*(?:\[\[|\[\(|\(\[|\(\(|\[\/|\[\\|\[|\(|\{)\s*"?([^"\]\)\}]+?)"?\s*(?:\]\]|\)\]|\]\)|\)\)|\/\]|\\\]|\]|\)|\})/g;
+  for (const m of src.matchAll(re)) {
+    if (out.has(m[1])) continue;
+    const label = m[2].replace(/<[^>]*>/g, " ").replace(/[\/\\]+$/g, "").trim();
+    const words = [...new Set(nodeWords(label))];
+    if (words.length) out.set(m[1], { id: m[1], label, words });
+  }
+  return [...out.values()];
+}
+
+// Ids of the nodes the sentence talks about: a node counts when at least half of its label words are said.
+export function nodesMentioned(sentence, nodes) {
+  const said = new Set(nodeWords(sentence));
+  if (!said.size || !nodes || !nodes.length) return [];
+  // short labels need every word said ("alias from SELECT" must not light up "FROM / JOIN"); longer ones, most of them
+  return nodes.filter((n) => n.words.filter((w) => said.has(w)).length >= (n.words.length <= 2 ? n.words.length : Math.ceil(n.words.length * 0.6))).map((n) => n.id);
+}
+
+// Indexes of the cells (not the row label) of a table row that the sentence talks about.
+export function cellsMentioned(sentence, table, rowIdx) {
+  const row = table && table.rows && table.rows[rowIdx];
+  if (!row) return [];
+  const said = new Set(tokens(sentence));
+  const hit = [];
+  row.forEach((c, j) => {
+    const w = [...new Set(tokens(plain(c)))];
+    if (j > 0 && w.length && w.filter((x) => said.has(x)).length >= Math.max(1, Math.ceil(w.length / 2))) hit.push(j);
+  });
+  return hit.length && hit.length < row.length - 1 ? hit : []; // every cell mentioned = the whole row, nothing finer to show
+}
+
+// Is the fine-grained focus allowed? (localStorage semai_focus_fine = "0" switches it off)
+export function fineFocusOn() {
+  try { return typeof localStorage === "undefined" || localStorage.getItem("semai_focus_fine") !== "0"; } catch (e) { return true; }
 }

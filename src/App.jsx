@@ -11,7 +11,7 @@ import { DEMO_SHOWCASE_SLIDES } from "./slideKit/demoSlides.js";
 import { validateSlide } from "./slideKit/validate.js";
 import { buildLectureNotesPdf } from "./slideKit/notesPdf.js";
 import { scrollTopForBlock } from "./slideKit/scroll.js";
-import { extractBlocks, matchSentenceToBlock } from "./slideKit/focus.js";
+import { extractBlocks, matchSentenceToBlock, diagramNodes, nodesMentioned, cellsMentioned, fineFocusOn } from "./slideKit/focus.js";
 import { logTiming, getTimingSummary } from "./telemetry.js";
 import { logClientError, Boundary } from "./errorLogging.jsx";
 import { startTracking, track, flushEvents, stopTracking, getStudentKey, slideKeyFor, postStandaloneEvents, flushQueuedEvents } from "./analytics.js";
@@ -3448,6 +3448,7 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
   const [speakProgress, setSpeakProgress] = useState({ slide: -1, i: 0, n: 1, text: "" });
   const [focusId, setFocusId] = useState(null); // which on-screen block the lecturer is talking about
   const lastFocusRef = useRef(null);
+  const [focusFine, setFocusFine] = useState({ nodes: [], cells: [] }); // finer focus: diagram nodes / table cells being talked about
   const [userScrolled, setUserScrolled] = useState(false);
   const [stageScrolled, setStageScrolled] = useState(false);
   const typedCodeRef = useRef("");
@@ -3636,21 +3637,36 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
   // table row / diagram it is about; if nothing clearly matches, the focus stays where it was.
   const blocks = useMemo(() => extractBlocks(slide), [slide]);
   const slideIsScripted = useMemo(() => !!buildStructuredUnits(slide), [slide]);
+  const dNodes = useMemo(() => (slide && slide.diagram ? diagramNodes(slide.diagram.code) : []), [slide]);
   useEffect(() => {
     lastFocusRef.current = null;
     setFocusId(null);
+    setFocusFine({ nodes: [], cells: [] });
   }, [slideIndex]);
   useEffect(() => {
     if (speakProgress.slide !== slideIndex || !autopilotOn || view !== "slides" || slideIsScripted) {
-      if (speakProgress.slide !== slideIndex || !autopilotOn) setFocusId(null);
+      if (speakProgress.slide !== slideIndex || !autopilotOn) { setFocusId(null); setFocusFine({ nodes: [], cells: [] }); }
       return;
     }
-    const m = matchSentenceToBlock(speakProgress.text, blocks, lastFocusRef.current);
+    const fine = fineFocusOn();
+    // a diagram: when the sentence names its steps, follow them on the diagram itself (not the words below it)
+    if (fine && dNodes.length) {
+      const hit = nodesMentioned(speakProgress.text, dNodes);
+      if (hit.length && hit.length <= 3) {
+        lastFocusRef.current = "diagram";
+        setFocusId("diagram");
+        setFocusFine({ nodes: hit, cells: [] });
+        return;
+      }
+    }
+    const m = matchSentenceToBlock(speakProgress.text, blocks, lastFocusRef.current, fine && slide && slide.table ? { rowBoost: 1.3 } : {});
     if (m) {
       lastFocusRef.current = m.id;
       setFocusId(m.id);
+      const rowI = fine && m.id.startsWith("row:") ? Number(m.id.slice(4)) : -1;
+      setFocusFine({ nodes: [], cells: rowI >= 0 ? cellsMentioned(speakProgress.text, slide.table, rowI) : [] });
     }
-  }, [speakProgress, blocks, slideIndex, autopilotOn, view, slideIsScripted]);
+  }, [speakProgress, blocks, dNodes, slide, slideIndex, autopilotOn, view, slideIsScripted]);
 
   // Keep what is being discussed comfortably in view (and only move when it isn't).
   useEffect(() => {
@@ -5124,6 +5140,8 @@ ${NATURAL_SPEECH_STYLE}`;
                 total={curriculum.slides.length}
                 revealCount={progressive ? reveal.count : Infinity}
                 focusId={progressive && !slideIsScripted ? focusId : null}
+                focusNodes={progressive && !slideIsScripted && focusId === "diagram" ? focusFine.nodes : null}
+                focusCells={progressive && !slideIsScripted && focusId && focusId.startsWith("row:") ? focusFine.cells : null}
                 showWarnings={role === "lecturer"}
                 footer={
                   interrupted && lecturerState !== "idle" ? (

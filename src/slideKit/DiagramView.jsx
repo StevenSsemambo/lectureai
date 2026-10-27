@@ -55,9 +55,22 @@ function EnlargedDiagram({ svg, caption, onClose }) {
 }
 
 // Mermaid is large, so it is only fetched the first time a diagram is shown.
-export default function DiagramView({ code, caption }) {
+export default function DiagramView({ code, caption, focusNodes = null }) {
   const [state, setState] = useState({ status: "loading", svg: "" });
   const [enlarged, setEnlarged] = useState(false);
+  const diagRef = useRef(null);
+  // the steps the lecturer is on light up; the rest are dimmed
+  useEffect(() => {
+    const root = diagRef.current;
+    if (!root) return;
+    const nodes = root.querySelectorAll("g.node");
+    const want = focusNodes && focusNodes.length ? focusNodes : null;
+    nodes.forEach((n) => {
+      const on = !!want && want.some((id) => (n.id || "").replace(/^.*?flowchart-/, "flowchart-").startsWith(`flowchart-${id}-`));
+      n.classList.toggle("sk-node-focus", on);
+    });
+    root.classList.toggle("has-node-focus", !!want && !!root.querySelector("g.node.sk-node-focus"));
+  }, [focusNodes, state]);
   // shapes that mean the wrong thing (a parallelogram in a cycle) are swapped for plain boxes, in saved diagrams too
   const drawCode = useMemo(() => fixDiagramShapes(code).code, [code]);
   useEffect(() => {
@@ -83,7 +96,7 @@ export default function DiagramView({ code, caption }) {
       {state.status === "ok" && (
         <div className="sk-diagram-wrap">
           <button type="button" className="sk-enlarge" onClick={() => setEnlarged(true)} aria-haspopup="dialog" title="Open the diagram bigger, with zoom">⤢ Enlarge</button>
-          <div className="sk-diagram" role="img" aria-label={caption || "Diagram"} style={{ "--sk-natural-w": `${naturalWidth(state.svg)}px` }} dangerouslySetInnerHTML={{ __html: state.svg }} />
+          <div className="sk-diagram" ref={diagRef} role="img" aria-label={caption || "Diagram"} style={{ "--sk-natural-w": `${naturalWidth(state.svg)}px` }} dangerouslySetInnerHTML={{ __html: state.svg }} />
         </div>
       )}
       {state.status === "error" && (
