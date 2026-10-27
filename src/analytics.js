@@ -39,10 +39,12 @@ export function getStudentKey(storage = safeLocalStorage()) {
 
 // Short stable fingerprint of a slide's content, so analysis stays valid even if the module is edited later.
 export function slideKeyFor(slide, index) {
-  const basis = `${slide.type}|${slide.title}|${(slide.concepts || []).join(",")}`;
+  // a student's personal deck has extra slides inserted: keep every original slide's key as it always was
+  const at = Number.isInteger(slide.origIndex) ? slide.origIndex : index;
+  const basis = `${slide.type}|${slide.title}|${(slide.concepts || []).join(",")}${slide.personal ? "|personal" : ""}`;
   let h = 5381;
   for (let i = 0; i < basis.length; i++) h = ((h << 5) + h + basis.charCodeAt(i)) | 0;
-  return `${index}:${(h >>> 0).toString(36)}`;
+  return `${at}:${(h >>> 0).toString(36)}`;
 }
 
 export function startTracking(c) {

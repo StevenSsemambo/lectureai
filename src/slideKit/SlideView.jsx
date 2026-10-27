@@ -128,6 +128,7 @@ export default function SlideView({ slide, unit, index, total, revealCount = Inf
           <span>{unit}</span>
           <span>{t !== "concept" && <span className="sk-type-chip">{TYPE_LABELS[t]}</span>}{!hideCounter && <> {index + 1} / {total}</>}</span>
         </div>
+        {slide.personal && <div className="sk-personal" role="note">Added for you: another way to see something that was tricky last time</div>}
         <h2><Rich text={slide.title} /></h2>
       </header>
 

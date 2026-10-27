@@ -3,12 +3,13 @@ import { PrivacyPolicyScreen, TermsScreen, LegalLinks } from "./legal.jsx";
 import SplashScreen, { VersionTag } from "./SplashScreen.jsx";
 import SlideView from "./slideKit/SlideView.jsx";
 import { summarizeLectureMemory, memoryByIndex, memoryWelcomeFact } from "./learning/lectureMemory.js";
+import { MAX_PERSONAL, reinforcementBrief, insertPersonalSlides, personalSignature, readPersonalCache, writePersonalCache } from "./learning/personalDeck.js";
 import { LEARNER_LEVELS, DEFAULT_NEW_LEVEL, normalizeLevel, levelRules } from "./slideKit/learnerLevel.js";
 import { Rich } from "./slideKit/MathText.jsx";
 import CodePane from "./slideKit/CodePane.jsx";
 import { SECTION_SYSTEM, sectionPrompt, MODULE_SYSTEM, modulePrompt, normalizeSectionNotes, normalizeModuleNotes, fallbackSectionNotes, fallbackModuleNotes } from "./slideKit/notesContent.js";
 import { normalizeSlide, slideToPlainContext, TYPE_LABELS, LANGUAGE_LABELS } from "./slideKit/schema.js";
-import { generateDeck } from "./slideKit/generate.js";
+import { generateDeck, buildSlide } from "./slideKit/generate.js";
 import { DEMO_SHOWCASE_SLIDES } from "./slideKit/demoSlides.js";
 import { validateSlide } from "./slideKit/validate.js";
 import { buildLectureNotesPdf } from "./slideKit/notesPdf.js";
@@ -978,6 +979,7 @@ async function generateLectureNotes(curriculum, onProgress, upToCount) {
   };
   for (let i = 0; i < count; i++) {
     const slide = curriculum.slides[i];
+    if (slide.personal) continue; // notes follow the standard lecture, not one student's extra slides
     onProgress && onProgress(`Organising notes for "${slide.title}" (${i + 1}/${count})…`);
     // Structured JSON (summary, key points, explanation, terms, pitfalls, review). Not fed
     // slide.notes (spoken narration) so the result reads as study notes, not a transcript.
@@ -3407,6 +3409,67 @@ function EmptyLecture({ role, onLeave, onEdit }) {
   );
 }
 
+// A returning student gets their own version of a lecture: the same slides, plus one extra "another way to see it" slide
+// after each slide that troubled them last time. If anything goes wrong or takes too long, they get the normal lecture.
+function PersonalRoom({ curriculum, settings, studentSession, moduleId, ...rest }) {
+  const eligible = !!studentSession && rest.role === "student" && (() => { try { return localStorage.getItem("semai_adapt") !== "0"; } catch (e) { return true; } })();
+  const [state, setState] = useState(eligible ? { phase: "checking" } : { phase: "ready", slides: null });
+  const skipRef = useRef(false);
+  useEffect(() => {
+    if (!eligible) return undefined;
+    let cancelled = false;
+    const done = (extras) => { if (!cancelled) setState({ phase: "ready", slides: extras && extras.size ? insertPersonalSlides(curriculum.slides, extras) : null }); };
+    (async () => {
+      let mem;
+      try {
+        const ev = await Promise.race([fetchLectureHistory(studentSession.user.id, moduleId, studentSession.accessToken), new Promise((_, rej) => setTimeout(() => rej(new Error("slow")), 3500))]);
+        mem = summarizeLectureMemory(ev, curriculum.slides, { keyFor: slideKeyFor });
+      } catch (e) { return done(null); }
+      const hard = (mem.hard || []).slice(0, MAX_PERSONAL);
+      if (!hard.length) return done(null);
+      const sig = personalSignature(hard);
+      const cached = readPersonalCache(studentSession.user.id, moduleId, sig);
+      if (cached) return done(new Map(Object.entries(cached).map(([k, v]) => [Number(k), v])));
+      if (!cancelled) setState({ phase: "preparing", count: hard.length });
+      const tone = (TONE_OPTIONS.find((t) => t.id === settings.tone) || TONE_OPTIONS[0]).desc;
+      const wordBudget = computeWordBudget(settings.durationMinutes, curriculum.slides.length, settings.pace);
+      const outlineBase = { code: curriculum.code, title: curriculum.title, unit: curriculum.unit };
+      const results = await Promise.all(hard.map(async (h) => {
+        try {
+          const anchor = curriculum.slides[h.index];
+          const brief = reinforcementBrief(anchor, h);
+          const outline = { ...outlineBase, slides: [{ title: brief.title, type: brief.type, focus: brief.focus, keyPoints: brief.keyPoints }] };
+          const slide = await Promise.race([
+            buildSlide({ callAI: (sys, pr, mt, md) => callAI(sys, pr, mt, md, "generate"), model: GEMINI_MODEL_STRONG, outline, index: 0, rawUnits: [brief.sourceText], settings: { ...settings, learnerLevel: "beginner" }, toneDesc: tone, wordBudget, allowLiveCode: !!settings.allowLiveCode }),
+            new Promise((_, rej) => setTimeout(() => rej(new Error("slow")), 70000)),
+          ]);
+          if (!slide || slide.warnings) return null; // a half-written slide is worse than none
+          return [h.index, slide];
+        } catch (e) { return null; }
+      }));
+      if (skipRef.current || cancelled) return;
+      const extras = new Map(results.filter(Boolean));
+      if (extras.size) writePersonalCache(studentSession.user.id, moduleId, sig, Object.fromEntries(extras));
+      done(extras);
+    })();
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  if (state.phase === "checking" || state.phase === "preparing") {
+    return (
+      <div className="setup-screen" role="status" aria-live="polite">
+        <div className="setup-header">
+          <div className="join-eyebrow">{curriculum.unit}</div>
+          <h1 className="join-title">{state.phase === "preparing" ? "Preparing your personal version…" : "Getting your lecture ready…"}</h1>
+          {state.phase === "preparing" && <p className="join-sub">Last time a few parts were tricky, so I'm writing {state.count === 1 ? "an extra slide" : `${state.count} extra slides`} that explain {state.count === 1 ? "it" : "them"} another way. This takes a moment.</p>}
+          <button className="skip-link" onClick={() => { skipRef.current = true; setState({ phase: "ready", slides: null }); }}>Start the normal lecture now</button>
+        </div>
+      </div>
+    );
+  }
+  return <LectureRoom {...rest} studentSession={studentSession} moduleId={moduleId} settings={settings} curriculum={state.slides ? { ...curriculum, slides: state.slides } : curriculum} />;
+}
+
 function LectureRoom(props) {
   if (!hasSlides(props.curriculum)) return <EmptyLecture role={props.role} onLeave={props.onLeave} onEdit={props.onEditSession} />;
   return <LectureRoomInner {...props} />;
@@ -3577,10 +3640,11 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
   }, [moduleId]);
   const trackedSlideRef = useRef(null);
   const focusIdRef = useRef(null);
-  const slideInfo = (i) => ({ index: i, key: slideKeyFor(curriculum.slides[i] || {}, i) });
+  const slideInfo = (i) => { const sl = curriculum.slides[i] || {}; return { index: Number.isInteger(sl.origIndex) ? sl.origIndex : i, key: slideKeyFor(sl, i) }; }; // personal extra slides report under the slide they follow
   const currentInfo = () => slideInfo(Math.min(slideIndexRef.current, curriculum.slides.length - 1));
   const enterSlideTracking = (i) => {
     const info = slideInfo(i);
+    if (curriculum.slides[i] && curriculum.slides[i].personal) { trackedSlideRef.current = null; return; } // extra slides never count in the lecturer's per-slide stats
     trackedSlideRef.current = { info, t0: Date.now() };
     track("slide_view", info, { type: curriculum.slides[i] && curriculum.slides[i].type });
   };
@@ -5837,7 +5901,7 @@ export default function SEMAIApp() {
         <MyHistoryScreen session={studentSession} courses={courses} onBack={() => setStage("join")} onAccountDeleted={handleStudentAccountDeleted} onOpenLegal={openLegal} />
       )}
       {stage === "room" && roomData && (
-        <LectureRoom
+        <PersonalRoom
           curriculum={roomData.curriculum}
           settings={roomData.settings}
           courseId={roomData.courseId}
