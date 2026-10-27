@@ -54,6 +54,7 @@ export function rowsToCourses(courseRows, moduleRows) {
       lecturerName: str(c.lecturer_name),
       lecturerPersona: str(c.lecturer_persona),
       lecturerStyleNote: str(c.lecturer_style_note),
+      learnerLevel: str(c.learner_level) || "some",
       modules: modulesByCourse.get(String(c.id)) || [],
     });
   }

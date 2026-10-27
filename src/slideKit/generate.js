@@ -17,6 +17,7 @@ const defaultSleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // transient "rate limited" into a success instead of a blank slide.
 const RETRY_DELAYS_MS = [0, 5000, 12000];
 
+import { levelRules, levelOutlineRules } from "./learnerLevel.js";
 const LANG_LIST = "java, c, cpp, python, javascript, typescript, vb, sql, html, css, bash";
 
 function sourceDigest(rawUnits, limit = 24000) {
@@ -49,6 +50,8 @@ Rules:
 - The first slide is a concept slide giving the overview and learning objectives; the last is a summary.
 - "focus" is one sentence saying exactly what that slide must teach; "keyPoints" lists 3-6 specific facts, formulas or steps it must contain (use your own subject knowledge to add correct depth if the source is thin).
 - Lecturer tone: ${toneDesc}.
+${levelOutlineRules(settings.learnerLevel)}
+${levelRules(settings.learnerLevel)}
 - If a course code / title / unit is provided, use it as given; otherwise infer them.`;
 }
 
@@ -95,8 +98,9 @@ const TYPE_SPECS = {
   summary: `Type "summary": "takeaways" = 4-7 crisp sentences students should remember (no "check" field on this slide); "checkQuestion": { "question": string, "answer": string } a quick question testing the main idea; "bullets": [] is fine; "detail" = 2 sentences on what comes next or how to practise.`,
 };
 
-export function buildSlideSystemPrompt(type, { toneDesc, wordBudget, allowLiveCode }) {
-  return `${COMMON(toneDesc, wordBudget, allowLiveCode)}\n${TYPE_SPECS[type] || TYPE_SPECS.concept}`;
+export function buildSlideSystemPrompt(type, { toneDesc, wordBudget, allowLiveCode, learnerLevel }) {
+  const rules = levelRules(learnerLevel);
+  return `${COMMON(toneDesc, wordBudget, allowLiveCode)}${rules ? `\n${rules}` : ""}\n${TYPE_SPECS[type] || TYPE_SPECS.concept}`;
 }
 
 function slideUserPrompt({ settings, outline, index, rawUnits }) {
@@ -151,7 +155,7 @@ async function callJson(callAI, system, prompt, maxTokens, model) {
 
 export async function buildSlide({ callAI, model, outline, index, rawUnits, settings, toneDesc, wordBudget, allowLiveCode, deps }) {
   const o = outline.slides[index];
-  const system = buildSlideSystemPrompt(o.type, { toneDesc, wordBudget, allowLiveCode });
+  const system = buildSlideSystemPrompt(o.type, { toneDesc, wordBudget, allowLiveCode, learnerLevel: settings.learnerLevel });
   const prompt = slideUserPrompt({ settings, outline, index, rawUnits });
   let slide = null;
   const sleep = (deps && deps.sleep) || defaultSleep;

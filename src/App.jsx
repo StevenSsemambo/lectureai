@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from "react"
 import { PrivacyPolicyScreen, TermsScreen, LegalLinks } from "./legal.jsx";
 import SplashScreen, { VersionTag } from "./SplashScreen.jsx";
 import SlideView from "./slideKit/SlideView.jsx";
+import { LEARNER_LEVELS, DEFAULT_NEW_LEVEL, normalizeLevel, levelRules } from "./slideKit/learnerLevel.js";
 import { Rich } from "./slideKit/MathText.jsx";
 import CodePane from "./slideKit/CodePane.jsx";
 import { SECTION_SYSTEM, sectionPrompt, MODULE_SYSTEM, modulePrompt, normalizeSectionNotes, normalizeModuleNotes, fallbackSectionNotes, fallbackModuleNotes } from "./slideKit/notesContent.js";
@@ -189,6 +190,7 @@ function buildRoomData(course, module) {
       lecturerName: course.lecturerName || "",
       lecturerPersona: course.lecturerPersona || "",
       lecturerStyleNote: course.lecturerStyleNote || "",
+      learnerLevel: normalizeLevel(course.learnerLevel),
     },
   };
 }
@@ -500,6 +502,7 @@ async function saveCourseToSupabase(course, accessToken) {
           lecturer_name: sanitizeName(course.lecturerName) || null,
           lecturer_persona: course.lecturerPersona || null,
           lecturer_style_note: sanitizeStyleNote(course.lecturerStyleNote) || null,
+          learner_level: normalizeLevel(course.learnerLevel),
         },
       ]),
     },
@@ -1431,7 +1434,7 @@ Rules:
 - The "notes" field should give the lecturer enough to deliver a full, well-developed explanation — specific examples, common misconceptions worth addressing, or points of emphasis, not just "explain X."
 - Every "notes" field must explicitly tell the lecturer to keep the spoken explanation to about ${estimatedWordBudget} words — adjust proportionally if your final slide count differs noticeably from the source unit count.
 - The lecturer's tone should be ${tone.desc}.
-- If a slide teaches a code example, set hasCode true, put the exact code in "code", and have "notes" instruct the lecturer to narrate it roughly top-to-bottom as if typing it live.
+${levelRules(settings.learnerLevel) ? levelRules(settings.learnerLevel) + "\n" : ""}- If a slide teaches a code example, set hasCode true, put the exact code in "code", and have "notes" instruct the lecturer to narrate it roughly top-to-bottom as if typing it live.
 ${settings.allowLiveCode ? "" : "- Do not create any code slides (hasCode must be false everywhere) — this lecturer has turned off live code demos.\n"}- If course code / title / unit were provided below, use them as given rather than inventing new ones.`;
 }
 
@@ -1776,6 +1779,16 @@ function CourseMetaScreen({ draft, editing, onChange, onContinue, onCancel }) {
           ))}
         </div>
 
+        <div className="setup-label" style={{ marginTop: 18 }} id="level-label">Who is this course for?</div>
+        <div className="pill-row" role="group" aria-labelledby="level-label">
+          {LEARNER_LEVELS.map((l) => (
+            <button key={l.id} className={`pill ${normalizeLevel(draft.learnerLevel) === l.id ? "active" : ""}`} onClick={() => onChange({ learnerLevel: l.id })} title={l.blurb} aria-pressed={normalizeLevel(draft.learnerLevel) === l.id}>
+              {l.label}
+            </button>
+          ))}
+        </div>
+        <div className="setup-optional" style={{ marginTop: 6 }}>{LEARNER_LEVELS.find((l) => l.id === normalizeLevel(draft.learnerLevel)).blurb} Slides are written for this level.</div>
+
         <div className="setup-label" style={{ marginTop: 18 }} id="lecturer-label">Your AI lecturer</div>
         <div className="setup-optional" style={{ marginTop: -2, marginBottom: 6 }}>
           Give the lecturer a name and a personality so students meet the same character every time. Students are always told it is an AI lecturer. Everything here is optional.
@@ -2001,6 +2014,7 @@ function ModuleSetupScreen({ course, setup, patchSetup, onSaveModule, onSaveAndP
     courseCode: course.code,
     courseTitle: course.title,
     tone: course.tone,
+    learnerLevel: normalizeLevel(course.learnerLevel),
     unitTitle: moduleSettings.unitTitle,
     durationMinutes: moduleSettings.durationMinutes,
     pace: moduleSettings.pace,
@@ -5563,7 +5577,7 @@ export default function SEMAIApp() {
     setCourseDraft({
       id: makeId("course"), code: "", title: "", institution: "",
       tone: "conversational", voiceProvider: "browser", elevenLabsApiKey: "", elevenLabsVoiceId: "",
-      lecturerName: "", lecturerPersona: DEFAULT_PERSONA, lecturerStyleNote: "",
+      lecturerName: "", lecturerPersona: DEFAULT_PERSONA, lecturerStyleNote: "", learnerLevel: DEFAULT_NEW_LEVEL,
       ownerId: session ? session.user.id : null,
       modules: [],
     });
