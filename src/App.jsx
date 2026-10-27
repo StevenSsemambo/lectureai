@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useCallback, useMemo } from "react"
 import { PrivacyPolicyScreen, TermsScreen, LegalLinks } from "./legal.jsx";
 import SplashScreen, { VersionTag } from "./SplashScreen.jsx";
 import SlideView from "./slideKit/SlideView.jsx";
+import { summarizeLectureMemory, memoryByIndex, memoryWelcomeFact } from "./learning/lectureMemory.js";
 import { LEARNER_LEVELS, DEFAULT_NEW_LEVEL, normalizeLevel, levelRules } from "./slideKit/learnerLevel.js";
 import { Rich } from "./slideKit/MathText.jsx";
 import CodePane from "./slideKit/CodePane.jsx";
@@ -615,6 +616,16 @@ async function fetchMyCheckEvents(studentId, accessToken) {
   return (Array.isArray(rows) ? rows : [])
     .map((r) => ({ concept: r.payload && r.payload.concept, correct: r.payload && (r.payload.correct === true || r.payload.correct === "true"), confidence: r.payload && r.payload.confidence, ts: Date.parse(r.created_at), moduleId: r.module_id, courseId: r.course_id }))
     .filter((e) => e.concept && typeof e.correct === "boolean");
+}
+
+// What this student did in THIS module on earlier visits (their own rows only): wrong answers, "lost" taps, questions.
+async function fetchLectureHistory(studentId, moduleId, accessToken) {
+  const rows = await supabaseRequest(
+    `/learning_events?student_id=eq.${encodeURIComponent(studentId)}&module_id=eq.${encodeURIComponent(moduleId)}&event_type=in.(check_answer,signal,question,session_start)&select=created_at,session_id,event_type,slide_index,slide_key,payload&order=created_at.desc&limit=1500`,
+    {},
+    accessToken
+  );
+  return (Array.isArray(rows) ? rows : []).map((r) => ({ session_id: r.session_id, event_type: r.event_type, slide_index: r.slide_index, slide_key: r.slide_key, payload: r.payload, ts: Date.parse(r.created_at) || 0 }));
 }
 
 // A student's finished-session totals (their own only), for the focus-rhythm note.
@@ -3449,6 +3460,8 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
   const [adaptNote, setAdaptNote] = useState(null); // { text, reason } shown beside the controls
   const historyRef = useRef([]); // quiz answers from earlier sessions (signed-in students only)
   const historyPromiseRef = useRef(null);
+  const lectureMemRef = useRef({ visits: 0, lastTs: 0, hard: [] }); // trouble spots from earlier visits to THIS lecture
+  const lectureMemPromiseRef = useRef(null);
   const sessionEvidenceRef = useRef([]); // quiz answers during THIS session (everyone)
   const sessionAdaptRef = useRef(emptySession());
   const planLevelRef = useRef({});
@@ -3551,6 +3564,9 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
       .then((ev) => { historyRef.current = ev; })
       .catch(() => {});
     fetchConceptNotes(studentSession.user.id, studentSession.accessToken).then((n) => { claimsRef.current = n; }).catch(() => {});
+    lectureMemPromiseRef.current = fetchLectureHistory(studentSession.user.id, moduleId, studentSession.accessToken)
+      .then((ev) => { lectureMemRef.current = summarizeLectureMemory(ev, curriculum.slides, { keyFor: slideKeyFor, currentSessionId: sessionIdRef.current }); })
+      .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const correctionsRef = useRef([]); // lecturer-approved answers for this module
@@ -4130,7 +4146,7 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
       }
 
       // How should THIS slide be taught to THIS student right now? (never skips content or changes assessment)
-      const plan = planForSlide({ slide: targetSlide, slideIndex: index, mastery: masteryNow(), session: sessionAdaptRef.current, enabled: adaptOnRef.current });
+      const plan = planForSlide({ slide: targetSlide, slideIndex: index, mastery: masteryNow(), session: sessionAdaptRef.current, enabled: adaptOnRef.current, lectureMemory: memoryByIndex(lectureMemRef.current) });
       planLevelRef.current[index] = plan.level;
       if (plan.applied) {
         setAdaptNote(adaptationLabel(plan));
@@ -4298,13 +4314,15 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
       50,
       Math.round(wordBudget * 0.7)
     )} words. ${NATURAL_SPEECH_STYLE}`;
-    await Promise.race([historyPromiseRef.current || Promise.resolve(), sleep(1500)]);
+    await Promise.race([Promise.all([historyPromiseRef.current, lectureMemPromiseRef.current]), sleep(1500)]);
     let personal = welcomeGuidance({ mode: "unknown", facts: [] });
     if (adaptOnRef.current) {
       const moduleConcepts = [...new Set(curriculum.slides.flatMap((s) => [...(s.concepts || []), ...(s.prerequisites || [])]))];
       // only things really on record: earlier answers from this student's own saved history
       const wf = buildWelcomeFacts({ events: historyRef.current, moduleConcepts });
       personal = welcomeGuidance(wf);
+      const memFact = memoryWelcomeFact(lectureMemRef.current);
+      if (memFact) personal = (wf.mode === "returning" ? personal : "") + ` Real record: ${memFact}. Say, in one friendly sentence, that you have noticed this and will spend a little extra time on those parts today. Never mention scores.`;
       const rel = conceptsToRevise(masteryNow(), 3).filter((c) => moduleConcepts.some((m) => conceptsMatch(m, c.concept))).map((c) => c.concept);
       if (rel.length && wf.mode === "returning") personal += ` Also say, in one friendly sentence, that you will give a quick reminder where ${rel.join(" and ")} come up. Do not mention scores or percentages.`;
     }

@@ -10,6 +10,7 @@
 //  - Nothing personal is sent to the AI: the prompt contains instructions, never names or scores.
 
 import { tokens } from "../slideKit/focus.js";
+import { memoryReason } from "./lectureMemory.js";
 
 // "for loops" ~ "loops": every word of the shorter name appears in the longer one.
 export function conceptsMatch(a, b) {
@@ -32,7 +33,7 @@ export function findLearnerConcept(mastery, name) {
 const emptySession = () => ({ wrongConcepts: new Set(), lostSlides: new Set(), reminded: new Set() });
 export { emptySession };
 
-export function planForSlide({ slide, slideIndex, mastery, session, enabled = true }) {
+export function planForSlide({ slide, slideIndex, mastery, session, enabled = true, lectureMemory = null }) {
   const standard = { level: "standard", reminder: null, reason: null, concept: null, applied: false };
   if (!enabled || !slide) return standard;
   const ses = session || emptySession();
@@ -40,6 +41,7 @@ export function planForSlide({ slide, slideIndex, mastery, session, enabled = tr
 
   const wrongNow = states.find((s) => [...ses.wrongConcepts].some((w) => conceptsMatch(w, s.name)));
   const lostNow = ses.lostSlides.has(slideIndex) || ses.lostSlides.has(slideIndex - 1);
+  const remembered = lectureMemory && lectureMemory.get ? lectureMemory.get(slideIndex) : null; // trouble on THIS slide in an earlier visit
   const weak = states.find((s) => s.entry && s.entry.n >= 2 && s.entry.level === "weak");
   const slipping = states.find((s) => s.entry && s.entry.n >= 2 && s.entry.trend === "slipping");
 
@@ -66,6 +68,9 @@ export function planForSlide({ slide, slideIndex, mastery, session, enabled = tr
   } else if (lostNow) {
     level = "simplify";
     reason = "You said you were lost, so I'll take this part slowly and simply.";
+  } else if (remembered) {
+    level = "simplify";
+    reason = memoryReason(remembered);
   } else if (slipping) {
     // checked before "weak": a student who WAS doing well and is now failing should hear "you knew this better before"
     level = "simplify"; concept = slipping.name;
