@@ -67,6 +67,12 @@ export default defineConfig({
             handler: "CacheFirst", // file names are content-hashed, so cache-first is safe
             options: { cacheName: "semai-lazy-assets", expiration: { maxEntries: 150, maxAgeSeconds: 60 * 60 * 24 * 30 } },
           },
+          {
+            // the lecturer's face (a ~2.3 MB model): downloaded only when the camera is on, then kept for offline use
+            urlPattern: ({ url, sameOrigin }) => sameOrigin && url.pathname.startsWith("/avatars/"),
+            handler: "CacheFirst",
+            options: { cacheName: "semai-avatar-model", expiration: { maxEntries: 4 }, cacheableResponse: { statuses: [0, 200] } },
+          },
         ],
       },
     }),

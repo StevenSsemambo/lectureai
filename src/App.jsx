@@ -35,6 +35,8 @@ import { extractAnswer, createChunker, createSSEParser, trimToSentence, continue
 import { milestoneFor, milestoneLine, MAX_MILESTONES_PER_LECTURE } from "./persona/milestones.js";
 import { FEEL_CHOICES, feelThanks } from "./persona/feel.js";
 import { speakWithBrowserVoice, remainingFrom } from "./voice/speech.js";
+import AvatarGate from "./avatar/AvatarGate.jsx";
+import { avatarBus } from "./avatar/avatarBus.js";
 import { loadPrefs as loadVoicePrefs, savePrefs as saveVoicePrefs, chooseVoice, clampRate } from "./voice/voicePrefs.js";
 import { createSessionManager, SessionExpiredError } from "./authSession.js";
 import { offlineStore } from "./offline/store.js";
@@ -3502,6 +3504,13 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
   const lastNudgeRef = useRef(0);
   const sessionCompleteRef = useRef(false);
   const [camOn, setCamOn] = useState(true);
+  // The camera icon also shows the lecturer's face (see src/avatar). If the face can't be shown it steps aside quietly.
+  const [avatarFailed, setAvatarFailed] = useState(false);
+  const avatarRailRef = useRef(null);
+  const avatarInlineRef = useRef(null);
+  const avatarSlots = useMemo(() => ({ rail: avatarRailRef, inline: avatarInlineRef }), []);
+  const avatarOn = camOn && !avatarFailed;
+  useEffect(() => { if (!camOn) setAvatarFailed(false); }, [camOn]); // switching the camera off and on tries again
   const [interrupted, setInterrupted] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [interimText, setInterimText] = useState("");
@@ -3906,6 +3915,7 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
   // `false` immediately (pause() doesn't fire a natural completion event,
   // so callers would otherwise hang waiting for one).
   const stopSpeaking = useCallback(() => {
+    avatarBus.stop();
     interruptedRef.current = true;
     speechGenRef.current += 1;
     window.speechSynthesis && window.speechSynthesis.cancel();
@@ -3991,8 +4001,16 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
             audio.onloadedmetadata = () => {
               if (isFinite(audio.duration)) onDurationKnown && onDurationKnown((audio.duration * 1000) / (voicePrefsRef.current.rate || 1));
             };
-            audio.onplaying = () => markStart("elevenlabs", { fetch_ms: fetchMs });
-            audio.onended = () => resolve(true);
+            let faceTold = false;
+            audio.onplaying = () => {
+              markStart("elevenlabs", { fetch_ms: fetchMs });
+              if (!faceTold) {
+                faceTold = true; // the face follows this audio element's own clock, so a pause/resume stays in sync
+                const r = voicePrefsRef.current.rate || 1;
+                avatarBus.recording(text, { durationMs: isFinite(audio.duration) ? (audio.duration * 1000) / r : 0, audio, rate: r });
+              }
+            };
+            audio.onended = () => { avatarBus.end(); resolve(true); };
             // a broken recording is not a student interruption: say "fail" so the browser voice takes over
             audio.onerror = () => resolve(stillMine() ? "fail" : false);
             // Watch the playback. The phone can pause it (a call, Bluetooth, another app) or it can freeze mid-way.
@@ -4046,12 +4064,16 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
           rate: voicePrefsRef.current.rate || 1,
           voice: chosen,
           onStart: () => markStart("browser"),
+          onPiece: (i, n, pieceText) => avatarBus.piece(pieceText, voicePrefsRef.current.rate || 1),
+          onPieceStart: (i, pieceText) => avatarBus.pieceStart(pieceText, voicePrefsRef.current.rate || 1),
+          onBoundary: (i, charIndex) => avatarBus.boundary(charIndex),
           shouldStop: () => !stillMine(),
           onTrouble: (kind) => {
             logTiming("tts_trouble", { provider: "browser", client_ms: Math.round(performance.now() - tSpeak), chars: text.length, extra: { kind } });
             if (kind === "gave-up") setTtsNotice("The browser voice stopped responding, so the lecturer is continuing on screen. Reloading the page usually brings it back.");
           },
         }).then((finished) => {
+          avatarBus.end();
           if (activeResolveRef.current === resolve) activeResolveRef.current = null;
           resolve(finished);
         });
@@ -5189,7 +5211,7 @@ ${NATURAL_SPEECH_STYLE}`;
         </div>
       )}
 
-      <div className="body">
+      <div className={`body${avatarOn ? " has-avatar" : ""}${chatOpen ? " chat-open" : ""}`}>
         <div className="main-col">
           <div className="tiles">
             <div className={`tile lecturer-tile ${lecturerState === "explaining" || lecturerState === "answering" ? "speaking" : ""}`}>
@@ -5209,6 +5231,7 @@ ${NATURAL_SPEECH_STYLE}`;
             <button className={view === "ide" ? "active" : ""} disabled={!slide.hasCode} onClick={() => setViewMode("ide")}>
               <Code2 size={14} /> Code editor
             </button>
+            {avatarOn && <div className="avatar-slot avatar-slot-inline" ref={avatarInlineRef} />}
           </div>
 
           <div
@@ -5354,6 +5377,9 @@ ${NATURAL_SPEECH_STYLE}`;
             </div>
           )}
         </div>
+
+        {avatarOn && <div className="avatar-slot avatar-slot-rail" ref={avatarRailRef} />}
+        {avatarOn && <AvatarGate slots={avatarSlots} chatOpen={chatOpen} lecturerState={lecturerState} onFail={() => setAvatarFailed(true)} />}
 
         {chatOpen && (
           <div className="side-panel">

@@ -75,7 +75,7 @@ export async function speakWithBrowserVoice(synth, Utter, text, o = {}) {
     const startedPiece = new Set();
     const finish = (r) => { if (settled) return; settled = true; clearInterval(timer); resolve(r); };
     const progress = () => { lastProgress = Date.now(); };
-    const advance = () => { current += 1; progress(); pieceT0 = Date.now(); if (current >= pieces.length) finish({ status: "done" }); else try { o.onPiece && o.onPiece(current, pieces.length); } catch (e) { /* ignore */ } };
+    const advance = () => { current += 1; progress(); pieceT0 = Date.now(); if (current >= pieces.length) finish({ status: "done" }); else try { o.onPiece && o.onPiece(current, pieces.length, pieces[current]); } catch (e) { /* ignore */ } };
 
     for (let k = from; k < pieces.length; k++) {
       const u = new Utter(pieces[k]);
@@ -83,9 +83,10 @@ export async function speakWithBrowserVoice(synth, Utter, text, o = {}) {
       if (o.voice) { try { u.voice = o.voice; if (o.voice.lang) u.lang = o.voice.lang; } catch (e) { /* unusable voice: keep the default */ } }
       u.onstart = () => {
         startedPiece.add(k); progress();
+        try { o.onPieceStart && o.onPieceStart(k, pieces[k]); } catch (e) { /* ignore */ }
         if (!startedOnce) { startedOnce = true; try { o.onStart && o.onStart(); } catch (e) { /* ignore */ } }
       };
-      u.onboundary = () => progress();
+      u.onboundary = (e) => { progress(); try { o.onBoundary && o.onBoundary(k, e && e.charIndex); } catch (err) { /* ignore */ } };
       u.onend = () => {
         // "Ended" almost at once, without ever starting, for a piece that needs a while to say: the engine dropped it.
         if (k === current && !startedPiece.has(k) && expectedMs(pieces[k]) > 250 && Date.now() - pieceT0 < expectedMs(pieces[k]) * 0.25) {
@@ -100,7 +101,7 @@ export async function speakWithBrowserVoice(synth, Utter, text, o = {}) {
       };
       try { synth.speak(u); } catch (e) { finish({ status: "stuck", at: from, started: false, why: "error" }); return; }
     }
-    try { o.onPiece && o.onPiece(from, pieces.length); } catch (e) { /* ignore */ }
+    try { o.onPiece && o.onPiece(from, pieces.length, pieces[from]); } catch (e) { /* ignore */ }
 
     timer = setInterval(() => {
       if (settled) return;
