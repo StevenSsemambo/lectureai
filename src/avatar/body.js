@@ -22,12 +22,12 @@ export const SHAPES = {
 // dur = how long the pose is held (ms). Both-hand poses are used on both sides.
 export const POSES = {
   rest: { u: [0.2, -1, 0.05], f: [0.14, -0.55, 0.8], n: [-0.8, -0.4, 0.2], hand: "relaxed", dur: 0 },
-  welcome: { u: [0.44, -0.82, 0.37], f: [-0.06, 0.52, 0.85], n: [0, 0.7, 0.6], hand: "open", dur: 1900 },
+  welcome: { u: [0.44, -0.82, 0.37], f: [-0.06, 0.52, 0.85], n: [0, 0.85, 0.4], hand: "open", dur: 1900 },
   open: { u: [0.44, -0.82, 0.37], f: [-0.06, 0.52, 0.85], n: [0, 0.9, 0.3], hand: "open", dur: 1600 },
   offer: { u: [0.26, -0.85, 0.47], f: [0.11, 0.26, 0.96], n: [0, 1, 0.1], hand: "open", dur: 1400 },
   beat: { u: [0.31, -0.81, 0.5], f: [0.08, 0.59, 0.81], n: [-0.8, 0.1, 0.3], hand: "open", dur: 1100, beat: true },
   stop: { u: [0.32, -0.79, 0.52], f: [0, 0.79, 0.61], n: [0, 0.1, 1], hand: "open", dur: 1200, beat: true },
-  point_slide: { u: [0.75, -0.45, 0.2], f: [0.95, 0.1, 0.3], n: [0, 1, 0.2], hand: "open", dur: 2000 },
+  point_slide: { hands: "R", u: [0.75, -0.45, 0.2], f: [0.95, 0.1, 0.3], n: [0, 1, 0.2], hand: "open", dur: 2000 },
   c1: { u: [0.23, -0.83, 0.5], f: [0.08, 0.86, 0.51], n: [0, 0, 1], hand: "c1", dur: 1900 },
   c2: { u: [0.23, -0.83, 0.5], f: [0.08, 0.86, 0.51], n: [0, 0, 1], hand: "c2", dur: 1900 },
   c3: { u: [0.23, -0.83, 0.5], f: [0.08, 0.86, 0.51], n: [0, 0, 1], hand: "c3", dur: 1900 },
@@ -37,17 +37,6 @@ export const POSES = {
   shrug: { u: [0.44, -0.82, 0.37], f: [-0.06, 0.52, 0.85], n: [0, 1, 0.1], hand: "open", dur: 1600 },
   together: { u: [0.4, -0.85, 0.45], f: [-0.25, 0.15, 0.7], n: [-1, 0, 0], hand: "open", dur: 1700 },
 };
-
-// Turns `bone` so that the line bone -> child points along `dir` (blended by k, 0..1).
-export function aim(bone, child, dir, k) {
-  bone.updateWorldMatrix(true, true);
-  const bp = new V3().setFromMatrixPosition(bone.matrixWorld);
-  const cp = new V3().setFromMatrixPosition(child.matrixWorld);
-  const q = new Q().setFromUnitVectors(cp.sub(bp).normalize(), dir.clone().normalize());
-  const bq = bone.getWorldQuaternion(new Q());
-  const pq = bone.parent.getWorldQuaternion(new Q());
-  bone.quaternion.slerp(pq.invert().multiply(q).multiply(bq), k);
-}
 
 // Measure the model once (in its rest pose) so the same code works for any standard humanoid rig:
 // which way each palm faces, and which axis curls each finger towards the palm.
@@ -87,6 +76,23 @@ export function buildRig(model, bones) {
     });
     rig.side[side] = { nLocal: n.clone().applyQuaternion(hq), hLocal: h.clone().applyQuaternion(hq), fingers };
   }
+  // arm calibration (rest pose): each bone's own long axis, and the elbow's hinge axis (anatomical flexion = about world -x at rest)
+  rig.arm = {};
+  for (const side of ["Left", "Right"]) {
+    const up = bones[side + "Arm"], fo = bones[side + "ForeArm"], ha = bones[side + "Hand"];
+    if (!up || !fo || !ha) { rig.arm[side] = null; continue; }
+    const au = fo.position.clone().normalize(), af = ha.position.clone().normalize();
+    // the rest pose already has a slight bend at the elbow: its plane is the elbow's hinge; b0 = how much it is bent at rest
+    const d0 = af.clone().applyQuaternion(fo.quaternion);
+    let eu = new V3().crossVectors(au, d0), b0 = Math.atan2(eu.length(), au.dot(d0));
+    if (eu.length() < 0.05) { // (almost) straight at rest: use the anatomical flexion axis, a forearm swinging forward
+      eu = new V3(-1, 0, 0).applyQuaternion(up.getWorldQuaternion(new Q()).invert());
+      eu.sub(au.clone().multiplyScalar(eu.dot(au))); b0 = 0;
+    }
+    eu.normalize();
+    rig.arm[side] = { q0u: up.quaternion.clone(), q0f: fo.quaternion.clone(), q0h: ha.quaternion.clone(), au, af, eu, b0 };
+  }
+
   // which way a positive head turn (about the head bone's own y axis) points: +1 = towards +x (the student's right)
   rig.yawSign = 1;
   const hb = bones.Head;
@@ -102,24 +108,6 @@ export function buildRig(model, bones) {
   return rig;
 }
 
-// Rolls the hand about its own length so the palm faces `want` (world direction), blended by k.
-export function orientPalm(rig, side, want, k) {
-  const sd = rig.side[side];
-  if (!sd) return;
-  const hand = rig.bones[side + "Hand"];
-  hand.updateWorldMatrix(true, false);
-  const hq = hand.getWorldQuaternion(new Q());
-  const c = sd.nLocal.clone().applyQuaternion(hq), h = sd.hLocal.clone().applyQuaternion(hq);
-  const proj = (v) => v.clone().sub(h.clone().multiplyScalar(v.dot(h)));
-  const c2 = proj(c), d2 = proj(want);
-  if (c2.lengthSq() < 1e-6 || d2.lengthSq() < 1e-6) return;
-  c2.normalize(); d2.normalize();
-  const ang = Math.atan2(h.dot(new V3().crossVectors(c2, d2)), c2.dot(d2));
-  const q = new Q().setFromAxisAngle(h, ang * Math.min(1, k));
-  const pq = hand.parent.getWorldQuaternion(new Q()).invert();
-  hand.quaternion.copy(pq.multiply(q).multiply(hq));
-}
-
 export function shapeHand(rig, side, shape, k) {
   const sd = rig.side[side];
   if (!sd || !shape) return;
@@ -132,11 +120,38 @@ export function shapeHand(rig, side, shape, k) {
   });
 }
 
-// Puts one arm into a pose. `bump` lifts the forearm a little (the quick stroke of an emphasis beat).
+const basis = (a, b) => new Q().setFromRotationMatrix(new THREE.Matrix4().makeBasis(a, b, new V3().crossVectors(a, b)));
+const MAX_ROLL = 1.8; // the palm can turn about 100 degrees either way, like a real forearm
+
+// Puts one arm into a pose. Every call computes the arm from the pose alone (never from the previous frame's twist), so
+// nothing can build up. The elbow only hinges like a real elbow; the palm turn is shared by forearm (60%) and wrist (40%).
+// `bump` lifts the forearm a little (the quick stroke of an emphasis beat). k = how far to move this frame (0..1).
 export function applyArm(rig, side, pose, k, bump = 0) {
-  const s = side === "Left" ? 1 : -1, B = rig.bones;
-  aim(B[side + "Arm"], B[side + "ForeArm"], new V3(s * pose.u[0], pose.u[1], pose.u[2]), k);
-  aim(B[side + "ForeArm"], B[side + "Hand"], new V3(s * pose.f[0], pose.f[1] + bump, pose.f[2]), k);
-  orientPalm(rig, side, new V3(s * pose.n[0], pose.n[1], pose.n[2]), k);
+  const A = rig.arm[side], sd = rig.side[side], B = rig.bones, s = side === "Left" ? 1 : -1;
+  if (!A) return;
+  const up = B[side + "Arm"], fo = B[side + "ForeArm"], ha = B[side + "Hand"];
+  const U = new V3(s * pose.u[0], pose.u[1], pose.u[2]).normalize();
+  const F = new V3(s * pose.f[0], pose.f[1] + bump, pose.f[2]).normalize();
+  // the elbow hinge axis is perpendicular to both arm directions; the upper arm turns about its own length to match it
+  let H = new V3().crossVectors(U, F);
+  const sinb = H.length(), beta = Math.atan2(sinb, U.dot(F));
+  if (sinb < 1e-4) H = new V3(-1, 0, 0).sub(U.clone().multiplyScalar(-U.x)).normalize(); else H.divideScalar(sinb);
+  const Qu = basis(U, H).multiply(basis(A.au, A.eu).invert());                       // world rotation of the upper arm
+  const uLocal = up.parent.getWorldQuaternion(new Q()).invert().multiply(Qu);
+  let fLocal = new Q().setFromAxisAngle(A.eu, beta - A.b0).multiply(A.q0f);          // the elbow: a pure hinge
+  let hLocal = A.q0h.clone();
+  if (sd && pose.n) {
+    const Qf0 = Qu.clone().multiply(fLocal), axis = A.af.clone().applyQuaternion(Qf0);
+    const c = sd.nLocal.clone().applyQuaternion(Qf0.clone().multiply(A.q0h)), want = new V3(s * pose.n[0], pose.n[1], pose.n[2]);
+    const proj = (v) => v.clone().sub(axis.clone().multiplyScalar(v.dot(axis)));
+    const c2 = proj(c), d2 = proj(want);
+    if (c2.lengthSq() > 1e-6 && d2.lengthSq() > 1e-6) {
+      c2.normalize(); d2.normalize();
+      const roll = Math.max(-MAX_ROLL, Math.min(MAX_ROLL, Math.atan2(axis.dot(new V3().crossVectors(c2, d2)), c2.dot(d2))));
+      fLocal = fLocal.multiply(new Q().setFromAxisAngle(A.af, roll * 0.6));
+      hLocal = A.q0h.clone().multiply(new Q().setFromAxisAngle(sd.hLocal, roll * 0.4));
+    }
+  }
+  up.quaternion.slerp(uLocal, k); fo.quaternion.slerp(fLocal, k); ha.quaternion.slerp(hLocal, k);
   shapeHand(rig, side, SHAPES[pose.hand], k);
 }

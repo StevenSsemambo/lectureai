@@ -457,6 +457,13 @@ export class LecturerFace {
     this.renderer.render(this.scene, this.cam);
   }
 
+  // one-handed gestures use either hand, mostly swapping (people do), except pointing at the slide (always the hand on the slide's side)
+  _pickHand(def) {
+    if (def.hands === "R") return RIGHT;
+    this.lastHand = Math.random() < 0.35 ? (this.lastHand || RIGHT) : (this.lastHand === RIGHT ? LEFT : RIGHT);
+    return this.lastHand;
+  }
+
   // something planned from the words happens now: a gesture, a quick expression, a head move or where the eyes go
   _act(ev, now) {
     if (ev.kind === "g") {
@@ -465,7 +472,7 @@ export class LecturerFace {
       const strong = def.beat || /^(c[123]|point_slide)$/.test(ev.g);
       if (!strong && now - this.lastGestureAt < 2200) return; // not a new gesture every second
       this.lastGestureAt = now;
-      for (const side of ev.s === "both" ? [LEFT, RIGHT] : [RIGHT]) this.pose[side] = { def, t: now, until: now + def.dur, beat: !!def.beat };
+      for (const side of ev.s === "both" ? [LEFT, RIGHT] : [this._pickHand(def)]) this.pose[side] = { def, t: now, until: now + def.dur, beat: !!def.beat };
       this.armsActiveUntil = now + def.dur + 1500; // the gesture, then time to settle back to rest
       if (def.beat) this.nodT = now;
     } else if (ev.kind === "f") this.pulses.push({ f: ev.f, amp: ev.amp, t: now, dur: ev.dur });

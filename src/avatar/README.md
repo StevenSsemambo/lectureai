@@ -44,3 +44,7 @@ or replace the GLB with one you own (any humanoid GLB with ARKit/Oculus-viseme b
   the body or the face (also on the way in and out), stay inside the side panel's picture, and that palms face where intended.
   Add or change a pose in `POSES`, run it, and it says at once if a hand would go through something.
 - Pointing at the slide assumes the slide is on the student's left of the lecturer (the desktop rail layout).
+- Arms are solved like a real arm (body.js `applyArm`): the upper arm and forearm point exactly where the pose says, the elbow only
+  hinges, and the palm turn is shared 60/40 by forearm and wrist (max ~100 degrees). Each frame is computed from the pose alone, never
+  from the previous frame's twist, so nothing can build up however long she talks. `t_body.mjs` checks this with 300 random gestures.
+- One-handed gestures swap between her right and left hand; pointing at the slide always uses the hand on the slide's side.

@@ -87,6 +87,39 @@ for (const [name, pose] of Object.entries(POSES)) {
   ok(minTH >= 0.03, `${name}: hands never go into the body on the way (${minTH.toFixed(3)})`);
   ok(minHD >= 0.05, `${name}: hands never go into the face on the way (${minHD.toFixed(3)})`);
 }
+// the left hand too: every one-handed gesture, done with the LEFT hand, must be just as clear
+for (const [name, pose] of Object.entries(POSES)) {
+  if (["rest", "point_slide", "welcome", "open", "wide", "small", "shrug", "together"].includes(name)) continue;
+  both(pose, POSES.rest);
+  const L = handPts("Left"), R = handPts("Right");
+  const sdL = rig.side.Left, hq = bones.LeftHand.getWorldQuaternion(new THREE.Quaternion());
+  const hl = sdL.hLocal.clone().applyQuaternion(hq), pr = (v) => v.clone().sub(hl.clone().multiplyScalar(v.dot(hl))).normalize();
+  const palm = pr(sdL.nLocal.clone().applyQuaternion(hq)).dot(pr(new V3(pose.n[0], pose.n[1], pose.n[2]).normalize()));
+  ok(dmin(L, R) >= 0.07 && dmin(L, torso) >= 0.035 && dmin(L, head) >= 0.08 && palm >= 0.8, `${name}: just as clear with the left hand (palm ${palm.toFixed(2)})`);
+}
+// no twisted joints: every pose reaches exactly the directions asked for, joints stay within what a real arm does, and nothing builds up
+const ang = (a, b) => (Math.acos(Math.max(-1, Math.min(1, a.clone().normalize().dot(b.clone().normalize())))) * 180) / Math.PI;
+const twistDeg = (bone, q0, axis) => { const rel = q0.clone().invert().multiply(bone.quaternion), sg = rel.w < 0 ? -1 : 1; return Math.abs((2 * Math.atan2(new V3(rel.x, rel.y, rel.z).multiplyScalar(sg).dot(axis), Math.abs(rel.w)) * 180) / Math.PI); };
+const twists = (side) => { const A = rig.arm[side]; return [twistDeg(bones[side + "Arm"], A.q0u, A.au), twistDeg(bones[side + "ForeArm"], A.q0f, A.af), twistDeg(bones[side + "Hand"], A.q0h, rig.side[side].hLocal)]; };
+const LIM = [85, 70, 50]; // upper arm, forearm, wrist: degrees of twist from the resting pose
+for (const [name, pose] of Object.entries(POSES)) {
+  both(pose, pose);
+  for (const side of ["Left", "Right"]) {
+    const sg = SIDES[side], sh = P(bones[side + "Arm"]), el = P(bones[side + "ForeArm"]), wr = P(bones[side + "Hand"]);
+    ok(ang(el.clone().sub(sh), new V3(sg * pose.u[0], pose.u[1], pose.u[2])) < 3 && ang(wr.clone().sub(el), new V3(sg * pose.f[0], pose.f[1], pose.f[2])) < 3, `${name} ${side}: arm points exactly where asked`);
+    const t = twists(side);
+    ok(t.every((x, i) => x <= LIM[i]), `${name} ${side}: joints not twisted (${t.map(Math.round).join("/")} degrees)`);
+  }
+}
+{ let seed = 7; const rnd = () => { seed = (seed * 1664525 + 1013904223) % 4294967296; return seed / 4294967296; };
+  const keys = Object.keys(POSES).filter((k) => k !== "rest"); let worst = [0, 0, 0];
+  for (let n = 0; n < 300; n++) {
+    const pl = POSES[keys[Math.floor(rnd() * keys.length)]], pr = POSES[keys[Math.floor(rnd() * keys.length)]];
+    for (let i = 0; i < 25; i++) { applyArm(rig, "Left", pl, 0.12); applyArm(rig, "Right", pr, 0.12); model.updateMatrixWorld(true); for (const sd of ["Left", "Right"]) twists(sd).forEach((x, j) => { worst[j] = Math.max(worst[j], x); }); }
+  }
+  ok(worst.every((x, i) => x <= LIM[i]), `300 random gestures in a row: twist never builds up (worst ${worst.map(Math.round).join("/")} degrees)`);
+  both(POSES.rest, POSES.rest); both(POSES.rest, POSES.rest);
+  const r = [...twists("Left"), ...twists("Right")]; ok(r.every((x, i) => x < [10, 12, 9][i % 3]), `back at rest the joints are untwisted again (${r.map(Math.round).join("/")})`); }
 // turning towards the slide: the engine multiplies by this sign, so it must be exactly +1 or -1 and really match the head
 ok(rig.yawSign === 1 || rig.yawSign === -1, "head turn direction measured");
 { const hb = bones.Head, f0 = new V3(0, 0, 1), sv = hb.quaternion.clone();
