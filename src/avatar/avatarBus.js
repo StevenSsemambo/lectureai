@@ -29,6 +29,7 @@ export const avatarBus = {
   recordingReady: (blob) => emit("recordingReady", { blob }),  // the recording has arrived (not playing yet): start measuring it
   recording: (text, { durationMs, audio, rate, blob } = {}) => emit("recording", { text, durationMs, audio, rate, blob }),
 
+  pieceEnd: () => emit("pieceEnd"),  // the voice really finished that piece: the mouth shuts at once, however long the guess was
   end: () => emit("end"),    // the line finished
   stop: () => emit("stop"),  // cut off (student asked something, paused, moved slide)
 };

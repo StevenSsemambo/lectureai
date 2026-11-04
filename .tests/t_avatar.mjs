@@ -127,5 +127,8 @@ globalThis.localStorage = { getItem() { throw new Error("blocked"); }, setItem()
 ok(getOffsetMs() === 0 && (setOffsetMs(100), true), "storage blocked (private mode): no error, offset 0");
 delete globalThis.localStorage;
 
+const s3 = []; const o3 = avatarBus.subscribe((t) => s3.push(t)); avatarBus.pieceEnd(); o3();
+ok(s3[0] === "pieceEnd", "the real end of a piece reaches the face");
+
 console.log(`avatar: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

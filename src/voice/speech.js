@@ -88,6 +88,7 @@ export async function speakWithBrowserVoice(synth, Utter, text, o = {}) {
       };
       u.onboundary = (e) => { progress(); try { o.onBoundary && o.onBoundary(k, e && e.charIndex, e && e.name); } catch (err) { /* ignore */ } };
       u.onend = () => {
+        try { o.onPieceEnd && o.onPieceEnd(k, pieces[k]); } catch (e) { /* ignore */ }
         // "Ended" almost at once, without ever starting, for a piece that needs a while to say: the engine dropped it.
         if (k === current && !startedPiece.has(k) && expectedMs(pieces[k]) > 250 && Date.now() - pieceT0 < expectedMs(pieces[k]) * 0.25) {
           finish({ status: "stuck", at: k, started: false, why: "dropped" });

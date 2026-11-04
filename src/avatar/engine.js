@@ -240,6 +240,7 @@ export class LecturerFace {
         this.wordLocked = true; this.awaitFirst = false;
         break;
       }
+      case "pieceEnd": this._finish(true, now, true); break; // the voice really stopped: shut the mouth now, do not run on
       case "end": this._finish(true, now); this._saveCal(); break;
       case "stop": this._finish(false, now); this._saveCal(); break;
       default: break;

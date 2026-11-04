@@ -4070,6 +4070,7 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
           onPiece: (i, n, pieceText) => avatarBus.piece(pieceText, voicePrefsRef.current.rate || 1, chosen && (chosen.voiceURI || chosen.name)),
           onPieceStart: (i, pieceText) => avatarBus.pieceStart(pieceText, voicePrefsRef.current.rate || 1, chosen && (chosen.voiceURI || chosen.name)),
           onBoundary: (i, charIndex, kind) => avatarBus.boundary(charIndex, kind),
+          onPieceEnd: () => avatarBus.pieceEnd(),
           shouldStop: () => !stillMine(),
           onTrouble: (kind) => {
             logTiming("tts_trouble", { provider: "browser", client_ms: Math.round(performance.now() - tSpeak), chars: text.length, extra: { kind } });
