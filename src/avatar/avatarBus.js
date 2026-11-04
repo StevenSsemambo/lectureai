@@ -21,12 +21,13 @@ export const avatarBus = {
   hasListeners: () => listeners.size > 0,
 
   // Browser voice speaks in short queued pieces (see voice/speech.js).
-  piece: (text, rate) => emit("piece", { text, rate }),              // piece queued / about to be spoken
-  pieceStart: (text, rate) => emit("pieceStart", { text, rate }),    // the engine really started saying it
-  boundary: (charIndex) => emit("boundary", { charIndex }),          // word boundary inside the current piece
+  piece: (text, rate, voice) => emit("piece", { text, rate, voice }),            // piece queued / about to be spoken
+  pieceStart: (text, rate, voice) => emit("pieceStart", { text, rate, voice }),  // the engine really started saying it
+  boundary: (charIndex, kind) => emit("boundary", { charIndex, kind }),          // word boundary inside the current piece
 
   // Recorded voice (ElevenLabs): the audio element itself is the clock.
-  recording: (text, { durationMs, audio, rate } = {}) => emit("recording", { text, durationMs, audio, rate }),
+  recordingReady: (blob) => emit("recordingReady", { blob }),  // the recording has arrived (not playing yet): start measuring it
+  recording: (text, { durationMs, audio, rate, blob } = {}) => emit("recording", { text, durationMs, audio, rate, blob }),
 
   end: () => emit("end"),    // the line finished
   stop: () => emit("stop"),  // cut off (student asked something, paused, moved slide)

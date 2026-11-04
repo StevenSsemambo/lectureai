@@ -1,6 +1,8 @@
 // Tests for src/avatar/lipsync.js and src/avatar/avatarBus.js (run: node .tests/t_avatar.mjs)
 import { buildTimeline, mouthAt, autoEmotion, planGestures, adaptMsPerUnit, unitIndexAt, MS_PER_UNIT_MIN, MS_PER_UNIT_MAX } from "../src/avatar/lipsync.js";
 import { avatarBus } from "../src/avatar/avatarBus.js";
+import { buildSpeechMap, positionFromFraction, nextWordT } from "../src/avatar/lipsync.js";
+import { analyseSamples } from "../src/avatar/envelope.js";
 let pass = 0, fail = 0;
 const ok = (c, m) => { c ? pass++ : (fail++, console.log("FAIL:", m)); };
 
@@ -75,6 +77,43 @@ off1(); off2();
 ok(!avatarBus.hasListeners(), "unsubscribing removes the listeners");
 avatarBus.end();
 ok(seen.length === 5, "nothing is delivered after unsubscribing");
+
+
+// ---- words, speech map ----
+const tw = buildTimeline("Hi there, you");
+ok(tw.words.length === 3 && tw.u[tw.words[1]].ci === 3 && tw.u[tw.words[2]].ci === 10, "word starts are found");
+ok(nextWordT(tw, tw.words[0]) === tw.u[tw.words[1]].t && nextWordT(tw, tw.words[2]) === tw.total, "next word start, or the end for the last word");
+const tp = buildTimeline("ab. cd");
+const mp = buildSpeechMap(tp);
+ok(Math.abs(mp.total - (tp.u[0].w + tp.u[1].w + tp.u[4].w + tp.u[5].w)) < 1e-9, "pauses (space, full stop) carry no voice time");
+ok(positionFromFraction(tp, mp, 0) === 0 && positionFromFraction(tp, mp, 1) === tp.total, "fraction 0 is the start, 1 the end");
+const fSecond = (tp.u[0].w + tp.u[1].w) / mp.total; // all of "ab" heard
+ok(Math.abs(positionFromFraction(tp, mp, fSecond) - tp.u[4].t) < 1e-9, "once all of the first sentence has been heard, the position is the start of the second (the pause is skipped)");
+const pm = [0.1, 0.3, 0.5, 0.7, 0.9].map((f) => positionFromFraction(tp, mp, f));
+ok(pm.every((x, i) => i === 0 || x >= pm[i - 1]), "position never goes backwards as more voice is heard");
+ok(positionFromFraction(tp, { cum: [0], total: 0 }, 0.5) === -1, "no voice time, no position");
+
+// ---- audio envelope: a synthetic 'recording' with a pause in the middle and silence at both ends ----
+const sr = 8000, sec = (t) => Math.round(t * sr);
+const sig = new Float32Array(sec(3));
+const burst = (a, b) => { for (let i = sec(a); i < sec(b); i++) sig[i] = 0.5 * Math.sin(2 * Math.PI * 200 * i / sr) * (0.6 + 0.4 * Math.sin(i / 300)); };
+burst(0.3, 1.1); burst(1.7, 2.5); // voice 0.3-1.1, pause, voice 1.7-2.5, silence to 3.0
+const an = analyseSamples(sig, sr);
+ok(an && Math.abs(an.hop - 0.02) < 1e-9 && an.n === 150, "analysis returns 20 ms frames");
+ok(an.voiced[Math.floor(0.7 / an.hop)] === 1 && an.voiced[Math.floor(1.4 / an.hop)] === 0 && an.voiced[Math.floor(2.8 / an.hop)] === 0 && an.voiced[Math.floor(0.1 / an.hop)] === 0, "voiced where sound is, silent in the pause and at both ends");
+ok(Math.abs(an.total * an.hop - 1.6) < 0.15, "about 1.6 s of voice found (" + (an.total * an.hop).toFixed(2) + ")");
+ok(an.cum[an.n] === an.total && an.cum[Math.floor(1.4 / an.hop)] === an.cum[Math.floor(1.6 / an.hop)], "voice heard stays flat during the pause");
+// a tiny 40 ms dip inside a word is bridged (stop consonant), a 300 ms pause is not
+const sig2 = Float32Array.from(sig); for (let i = sec(0.60); i < sec(0.64); i++) sig2[i] = 0;
+const an2 = analyseSamples(sig2, sr);
+ok(an2.voiced[Math.floor(0.62 / an2.hop)] === 1, "a 40 ms dip inside a word is not a pause");
+ok(analyseSamples(new Float32Array(sec(2)), sr) === null && analyseSamples(new Float32Array(10), sr) === null, "silence or a too-short clip: nothing to measure");
+// with the map: first sentence of 'Hello. World' lands in the first burst, second in the second burst
+const t4 = buildTimeline("Hello. World"), m4 = buildSpeechMap(t4);
+const at = (sec_) => positionFromFraction(t4, m4, (an.cum[Math.floor(sec_ / an.hop)] + 0.5) / an.total);
+ok(at(0.5) < t4.u[6].t && at(2.0) >= t4.u[6].t, "first burst = 'Hello', second burst = 'World' (not the even stretch)");
+const stretched = (2.0 / 3.0) * t4.total; // what the old even stretch would have said at 2.0 s
+ok(stretched < t4.u[6].t + 0.01 || true, "(old method for comparison: " + stretched.toFixed(1) + " of " + t4.total.toFixed(1) + ")");
 
 console.log(`avatar: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

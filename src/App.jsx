@@ -3988,6 +3988,7 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
           return await res.blob();
           }, 20000);
           if (navMoved()) return false;
+          avatarBus.recordingReady(blob); // the face starts measuring the recording's real pauses now, before it plays
           const fetchMs = Math.round(performance.now() - tSpeak); // the whole sentence is downloaded before playback begins
           const url = URL.createObjectURL(blob);
           const audio = new Audio(url);
@@ -4007,7 +4008,7 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
               if (!faceTold) {
                 faceTold = true; // the face follows this audio element's own clock, so a pause/resume stays in sync
                 const r = voicePrefsRef.current.rate || 1;
-                avatarBus.recording(text, { durationMs: isFinite(audio.duration) ? (audio.duration * 1000) / r : 0, audio, rate: r });
+                avatarBus.recording(text, { durationMs: isFinite(audio.duration) ? (audio.duration * 1000) / r : 0, audio, rate: r, blob });
               }
             };
             audio.onended = () => { avatarBus.end(); resolve(true); };
@@ -4064,9 +4065,9 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
           rate: voicePrefsRef.current.rate || 1,
           voice: chosen,
           onStart: () => markStart("browser"),
-          onPiece: (i, n, pieceText) => avatarBus.piece(pieceText, voicePrefsRef.current.rate || 1),
-          onPieceStart: (i, pieceText) => avatarBus.pieceStart(pieceText, voicePrefsRef.current.rate || 1),
-          onBoundary: (i, charIndex) => avatarBus.boundary(charIndex),
+          onPiece: (i, n, pieceText) => avatarBus.piece(pieceText, voicePrefsRef.current.rate || 1, chosen && (chosen.voiceURI || chosen.name)),
+          onPieceStart: (i, pieceText) => avatarBus.pieceStart(pieceText, voicePrefsRef.current.rate || 1, chosen && (chosen.voiceURI || chosen.name)),
+          onBoundary: (i, charIndex, kind) => avatarBus.boundary(charIndex, kind),
           shouldStop: () => !stillMine(),
           onTrouble: (kind) => {
             logTiming("tts_trouble", { provider: "browser", client_ms: Math.round(performance.now() - tSpeak), chars: text.length, extra: { kind } });

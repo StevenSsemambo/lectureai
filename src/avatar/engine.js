@@ -10,7 +10,24 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import {
   buildTimeline, mouthAt, autoEmotion, planGestures, adaptMsPerUnit, GESTURE_POSES, BASE_MS_PER_UNIT, clamp,
+  MS_PER_UNIT_MIN, MS_PER_UNIT_MAX, buildSpeechMap, positionFromFraction, nextWordT,
 } from "./lipsync.js";
+import { analyseBlob } from "./envelope.js";
+
+// Each browser voice has its own speed. What we learn about it is kept on this device so the next lecture starts in sync.
+const CAL_KEY = "semai.lipsync.ms.v1";
+function loadCal(voice) {
+  try { const v = JSON.parse(localStorage.getItem(CAL_KEY) || "{}")[voice]; return v >= MS_PER_UNIT_MIN && v <= MS_PER_UNIT_MAX ? v : null; } catch (e) { return null; }
+}
+function saveCal(voice, ms) {
+  try {
+    const o = JSON.parse(localStorage.getItem(CAL_KEY) || "{}");
+    o[voice] = Math.round(ms * 10) / 10;
+    const keys = Object.keys(o);
+    if (keys.length > 12) delete o[keys[0]];
+    localStorage.setItem(CAL_KEY, JSON.stringify(o));
+  } catch (e) { /* storage unavailable: fine */ }
+}
 
 const { Vector3: V3, Quaternion: Q } = THREE;
 const LEFT = "Left", RIGHT = "Right";
@@ -63,7 +80,9 @@ export class LecturerFace {
     this.speaking = false; this.thinking = false; this.speechEmo = "neutral";
     this.tl = null; this.tlStart = 0; this.t0 = 0; this.rate = 1; this.fixedMs = 0; this.audio = null;
     this.gestures = []; this.gi = 0; this.pending = null;
-    this.baseMs = BASE_MS_PER_UNIT;
+    this.baseMs = BASE_MS_PER_UNIT; this.voiceKey = null; this.calDirty = false;
+    this.lastB = null; this.wordLocked = false; this.nextT = 0; // browser voice: word boundaries seen in this piece
+    this.env = null; this.map = null; this.level = 0; this.jobs = new WeakMap(); // recorded voice: measured loudness
 
     this.last = performance.now(); this.lastRender = 0; this.size = { w: 0, h: 0 };
 
@@ -164,28 +183,59 @@ export class LecturerFace {
     if (this.disposed) return;
     const now = performance.now();
     switch (type) {
-      case "piece": this.pending = { text: d.text, rate: d.rate, at: now }; break;
-      case "pieceStart": this.pending = null; this._begin({ text: d.text, rate: d.rate }, now); break;
-      case "recording": this.pending = null; this._begin({ text: d.text, rate: d.rate, durationMs: d.durationMs, audio: d.audio }, now); break;
-      case "boundary": {
-        if (!this.tl || this.fixedMs || this.audio) break; // recordings are timed by the audio itself
-        const k = this.tl.u.findIndex((x) => x.ci >= d.charIndex);
-        if (k >= 0) this.tlStart = now - this.tl.u[k].t * this._msPerUnit();
+      case "piece": this.pending = { text: d.text, rate: d.rate, voice: d.voice, at: now }; break;
+      case "pieceStart": this.pending = null; this._begin({ text: d.text, rate: d.rate, voice: d.voice }, now); break;
+      case "recordingReady": this._analyse(d.blob); break; // measure it while it is still being set up
+      case "recording": {
+        this.pending = null;
+        this._begin({ text: d.text, rate: d.rate, durationMs: d.durationMs, audio: d.audio }, now);
+        if (d.blob && this.tl) {
+          const tl = this.tl;
+          this._analyse(d.blob).then((env) => { if (env && !this.disposed && this.tl === tl && this.audio) { this.env = env; this.map = buildSpeechMap(tl); } });
+        }
         break;
       }
-      case "end": this._finish(true, now); break;
-      case "stop": this._finish(false, now); break;
+      case "boundary": {
+        if (!this.tl || this.fixedMs || this.audio || d.kind === "sentence") break; // recordings are timed by the audio itself
+        const k = this.tl.u.findIndex((x) => x.ci >= d.charIndex);
+        if (k < 0) break;
+        const ut = this.tl.u[k].t;
+        if (this.lastB && ut > this.lastB.t + 0.5) {
+          // how fast is this voice really talking? learn it from the time between two words, right now
+          const dMs = now - this.lastB.at;
+          if (dMs > 40 && dMs < 3000) {
+            const measured = (dMs / (ut - this.lastB.t)) * (this.rate || 1);
+            this.baseMs = clamp(this.baseMs * 0.65 + measured * 0.35, MS_PER_UNIT_MIN, MS_PER_UNIT_MAX);
+            this.calDirty = true;
+          }
+        }
+        this.lastB = { t: ut, at: now };
+        this.tlStart = now - ut * this._msPerUnit(); // snap to this word...
+        this.nextT = nextWordT(this.tl, k);          // ...and do not run into the next one before the voice gets there
+        this.wordLocked = true;
+        break;
+      }
+      case "end": this._finish(true, now); this._saveCal(); break;
+      case "stop": this._finish(false, now); this._saveCal(); break;
       default: break;
     }
   }
 
   setThinking(v) { this.thinking = !!v; }
 
+  _analyse(blob) {
+    let job = this.jobs.get(blob);
+    if (!job) { job = analyseBlob(blob); this.jobs.set(blob, job); }
+    return job;
+  }
+  _saveCal() { if (this.calDirty && this.voiceKey) { saveCal(this.voiceKey, this.baseMs); this.calDirty = false; } }
+
   _msPerUnit() { return this.fixedMs || clamp(this.baseMs / (this.rate || 1), 30, 160); }
 
-  _begin({ text, rate, durationMs, audio }, now) {
+  _begin({ text, rate, durationMs, audio, voice }, now) {
     if (!text) return;
     this._finish(true, now, true); // learn the speed of the piece that just ended
+    if (voice && voice !== this.voiceKey) { this._saveCal(); this.voiceKey = voice; this.baseMs = loadCal(voice) || BASE_MS_PER_UNIT; this.calDirty = false; }
     this.tl = buildTimeline(text);
     this.gestures = planGestures(text, this.tl); this.gi = 0;
     this.rate = rate || 1;
@@ -197,8 +247,10 @@ export class LecturerFace {
   }
 
   _finish(natural, now, keepSpeaking = false) {
-    if (natural && this.tl && this.t0 && !this.fixedMs && !this.audio) this.baseMs = adaptMsPerUnit(this.baseMs, now - this.t0, this.tl.total, this.rate);
+    // a piece the boundaries already timed has taught us its speed; otherwise learn it from how long the whole piece took
+    if (natural && this.tl && this.t0 && !this.fixedMs && !this.audio && !this.wordLocked) { this.baseMs = adaptMsPerUnit(this.baseMs, now - this.t0, this.tl.total, this.rate); this.calDirty = true; }
     this.tl = null; this.t0 = 0; this.audio = null; this.fixedMs = 0;
+    this.env = null; this.map = null; this.level = 0; this.lastB = null; this.wordLocked = false;
     if (!keepSpeaking) { this.speaking = false; this.pending = null; this.speechEmo = "neutral"; }
   }
 
@@ -208,9 +260,17 @@ export class LecturerFace {
     if (this.audio) {
       const a = this.audio, dur = a.duration;
       if (a.paused || !(dur > 0) || !isFinite(dur)) return -1;
-      return (a.currentTime / dur) * this.tl.total;
+      if (this.env && this.map) {
+        // the real sound decides: silent frames shut the mouth, and the words advance only while the voice is sounding
+        const e = this.env, f = Math.floor(a.currentTime / e.hop);
+        if (f < 0 || f >= e.n || !e.voiced[f]) { this.level = 0; return -1; }
+        this.level = e.env[f];
+        return positionFromFraction(this.tl, this.map, (e.cum[f] + 0.5) / e.total);
+      }
+      return (a.currentTime / dur) * this.tl.total; // not measured (yet): stretch the text evenly over the recording
     }
-    return (now - this.tlStart) / this._msPerUnit();
+    const p = (now - this.tlStart) / this._msPerUnit();
+    return this.wordLocked ? Math.min(p, this.nextT - 0.01) : p;
   }
 
   // ---------- frame ----------
@@ -236,7 +296,8 @@ export class LecturerFace {
       while (this.gi < this.gestures.length && p >= this.gestures[this.gi].t) this._fire(this.gestures[this.gi++], now);
       const m = mouthAt(this.tl, p);
       if (m) {
-        T[m.viseme] = m.weight; T.jawOpen = m.jaw;
+        const lv = this.audio && this.env ? clamp(0.6 + 0.55 * this.level, 0.5, 1.15) : 1; // louder sound, wider mouth
+        T[m.viseme] = m.viseme === "viseme_PP" ? m.weight : Math.min(1, m.weight * lv); T.jawOpen = m.jaw * lv;
         if (m.funnel) T.mouthFunnel = m.funnel;
         if (m.pucker) T.mouthPucker = m.pucker;
         if (m.next) T[m.next.viseme] = Math.max(T[m.next.viseme] || 0, m.next.weight);

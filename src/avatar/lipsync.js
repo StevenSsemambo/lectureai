@@ -23,9 +23,11 @@ export const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
 // text -> { u: [{ v, w, ci, t, vow, amp }], total }   (ci = character index in the text, t = start on the timeline)
 export function buildTimeline(text) {
   const u = [];
+  const words = []; // indexes (into u) of the first unit of each word
   const s = String(text || "").toLowerCase();
   let i = 0;
   let c = 0;
+  let prevSpace = true;
   while (i < s.length) {
     const ch = s[i];
     const two = s.substr(i, 2);
@@ -37,11 +39,38 @@ export function buildTimeline(text) {
     else if (",;:".includes(ch)) w = 3;
     else if (".!?".includes(ch)) w = 5;
     else if (ch === " ") w = 0.5;
-    u.push({ v, w, ci: i, t: c, vow, amp: 0.82 + ((i * 7) % 5) * 0.05 });
+    const space = /\s/.test(ch), pause = ",;:.!?".includes(ch);
+    if (!space && prevSpace) words.push(u.length);
+    prevSpace = space;
+    // sw = how much real voice time this unit takes (spaces and punctuation are pauses: no voice time of their own)
+    u.push({ v, w, ci: i, t: c, vow, amp: 0.82 + ((i * 7) % 5) * 0.05, sw: space || pause ? 0 : v ? w : 0.6 });
     c += w;
     i += n;
   }
-  return { u, total: c };
+  return { u, total: c, words };
+}
+
+// Timeline position where the word after unit k begins (or the end of the piece).
+export function nextWordT(tl, k) {
+  for (const j of tl.words || []) if (j > k) return tl.u[j].t;
+  return tl.total;
+}
+
+// Maps "fraction of the voiced sound heard so far" (0..1) to a timeline position, so pauses in the recording
+// (which carry no voice time) line up with spaces and punctuation in the text instead of shifting everything.
+export function buildSpeechMap(tl) {
+  const cum = new Float64Array(tl.u.length + 1);
+  for (let k = 0; k < tl.u.length; k++) cum[k + 1] = cum[k] + tl.u[k].sw;
+  return { cum, total: cum[tl.u.length] };
+}
+export function positionFromFraction(tl, map, f) {
+  if (!(map.total > 0)) return -1;
+  const target = clamp(f, 0, 1) * map.total;
+  if (target >= map.total) return tl.total;
+  let lo = 0, hi = tl.u.length - 1; // last unit k with cum[k] <= target (that unit then has voice time, since cum[k+1] > target)
+  while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (map.cum[mid] <= target) lo = mid; else hi = mid - 1; }
+  const un = tl.u[lo];
+  return un.t + ((target - map.cum[lo]) / (un.sw || 1)) * un.w;
 }
 
 // Index of the timeline unit that covers position p (in weight units).

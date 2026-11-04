@@ -86,7 +86,7 @@ export async function speakWithBrowserVoice(synth, Utter, text, o = {}) {
         try { o.onPieceStart && o.onPieceStart(k, pieces[k]); } catch (e) { /* ignore */ }
         if (!startedOnce) { startedOnce = true; try { o.onStart && o.onStart(); } catch (e) { /* ignore */ } }
       };
-      u.onboundary = (e) => { progress(); try { o.onBoundary && o.onBoundary(k, e && e.charIndex); } catch (err) { /* ignore */ } };
+      u.onboundary = (e) => { progress(); try { o.onBoundary && o.onBoundary(k, e && e.charIndex, e && e.name); } catch (err) { /* ignore */ } };
       u.onend = () => {
         // "Ended" almost at once, without ever starting, for a piece that needs a while to say: the engine dropped it.
         if (k === current && !startedPiece.has(k) && expectedMs(pieces[k]) > 250 && Date.now() - pieceT0 < expectedMs(pieces[k]) * 0.25) {
