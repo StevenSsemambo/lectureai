@@ -3,6 +3,7 @@ import { buildTimeline, mouthAt, autoEmotion, planGestures, adaptMsPerUnit, unit
 import { avatarBus } from "../src/avatar/avatarBus.js";
 import { buildSpeechMap, positionFromFraction, nextWordT } from "../src/avatar/lipsync.js";
 import { analyseSamples } from "../src/avatar/envelope.js";
+import { getOffsetMs, setOffsetMs, OFFSET_MIN, OFFSET_MAX } from "../src/avatar/lipTuning.js";
 let pass = 0, fail = 0;
 const ok = (c, m) => { c ? pass++ : (fail++, console.log("FAIL:", m)); };
 
@@ -114,6 +115,17 @@ const at = (sec_) => positionFromFraction(t4, m4, (an.cum[Math.floor(sec_ / an.h
 ok(at(0.5) < t4.u[6].t && at(2.0) >= t4.u[6].t, "first burst = 'Hello', second burst = 'World' (not the even stretch)");
 const stretched = (2.0 / 3.0) * t4.total; // what the old even stretch would have said at 2.0 s
 ok(stretched < t4.u[6].t + 0.01 || true, "(old method for comparison: " + stretched.toFixed(1) + " of " + t4.total.toFixed(1) + ")");
+
+// ---- the student's timing offset ----
+const store = new Map(); globalThis.localStorage = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) };
+ok(getOffsetMs() === 0, "offset defaults to 0");
+setOffsetMs(250); ok(getOffsetMs() === 250, "offset is saved and read back");
+setOffsetMs(99999); ok(getOffsetMs() === OFFSET_MAX, "offset is capped at the top");
+setOffsetMs(-99999); ok(getOffsetMs() === OFFSET_MIN, "offset is capped at the bottom");
+store.set("semai.lipsync.offset.v1", "junk"); ok(getOffsetMs() === 0, "a junk stored value reads as 0");
+globalThis.localStorage = { getItem() { throw new Error("blocked"); }, setItem() { throw new Error("blocked"); } };
+ok(getOffsetMs() === 0 && (setOffsetMs(100), true), "storage blocked (private mode): no error, offset 0");
+delete globalThis.localStorage;
 
 console.log(`avatar: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

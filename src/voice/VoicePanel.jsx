@@ -1,4 +1,5 @@
 import React, { useEffect, useRef } from "react";
+import LipSyncTuner from "../avatar/LipSyncTuner.jsx";
 import { RATE_MIN, RATE_MAX, RATE_PRESETS, classifyVoice, voicesForLanguage, genderAvailable, rateLabel, clampRate } from "./voicePrefs.js";
 
 const GENDERS = [["any", "Any"], ["female", "Female"], ["male", "Male"]];
@@ -61,6 +62,8 @@ export default function VoicePanel({ open, onClose, prefs, onChange, voices, lan
             <p className="voice-note">Available voices depend on your device and browser. Changes apply from the lecturer's next sentence.</p>
           </>
         )}
+
+        <LipSyncTuner />
 
         <div className="voice-actions">
           <button className="nav-btn" onClick={onPreview} disabled={!canPreview} title={canPreview ? "Hear a sample" : "Pause the lecture to hear a sample"}>▶ Preview</button>

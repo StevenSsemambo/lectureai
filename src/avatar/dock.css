@@ -43,3 +43,5 @@
 .avatar-spin { width: 16px; height: 16px; border-radius: 50%; border: 2px solid rgba(237, 239, 242, 0.25); border-top-color: #EDEFF2; animation: avatar-spin 0.9s linear infinite; }
 @keyframes avatar-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .avatar-spin { animation: none; } .avatar-card { transition: none; } }
+
+.avatar-debug { position: fixed; left: 6px; bottom: 6px; z-index: 9999; margin: 0; padding: 6px 8px; max-width: min(92vw, 540px); background: rgba(0, 0, 0, 0.78); color: #9fe8c8; font: 10px/1.4 ui-monospace, Menlo, monospace; white-space: pre-wrap; border-radius: 6px; pointer-events: none; }

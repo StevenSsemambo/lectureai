@@ -4064,6 +4064,8 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
         speakWithBrowserVoice(window.speechSynthesis, SpeechSynthesisUtterance, speakText, {
           rate: voicePrefsRef.current.rate || 1,
           voice: chosen,
+          // with the face on, device voices are spoken sentence by sentence (not in one 600-character go): every piece start/end re-syncs the mouth
+          maxPiece: chosen && chosen.localService === true && avatarBus.hasListeners() ? 220 : undefined,
           onStart: () => markStart("browser"),
           onPiece: (i, n, pieceText) => avatarBus.piece(pieceText, voicePrefsRef.current.rate || 1, chosen && (chosen.voiceURI || chosen.name)),
           onPieceStart: (i, pieceText) => avatarBus.pieceStart(pieceText, voicePrefsRef.current.rate || 1, chosen && (chosen.voiceURI || chosen.name)),

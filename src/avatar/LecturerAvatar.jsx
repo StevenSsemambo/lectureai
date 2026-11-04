@@ -8,6 +8,7 @@ import { createPortal } from "react-dom";
 import { LecturerFace } from "./engine.js";
 import { avatarBus } from "./avatarBus.js";
 import { logClientError } from "../errorLogging.jsx";
+import { debugEnabled } from "./lipTuning.js";
 
 const BASE = (typeof import.meta !== "undefined" && import.meta.env && import.meta.env.BASE_URL) || "/";
 const MODEL_URL = `${BASE}avatars/avatar-f1.glb`;
@@ -90,10 +91,19 @@ export default function LecturerAvatar({ slots, chatOpen, lecturerState }) {
   useEffect(() => { if (faceRef.current) faceRef.current.setThinking(lecturerState === "loading"); }, [lecturerState, status]);
   useEffect(() => { host.card.classList.toggle("speaking", speaking); }, [speaking, host]);
 
+  // ?lipdebug: a small text box with what the face knows about the voice's timing (for tuning)
+  const [debugOn] = useState(debugEnabled);
+  const [dbg, setDbg] = useState("");
+  useEffect(() => {
+    if (!debugOn) return undefined;
+    const id = setInterval(() => { if (faceRef.current) setDbg(faceRef.current.debugLine()); }, 400);
+    return () => clearInterval(id);
+  }, [debugOn]);
+
   const start = () => setRun((r) => r + 1);
   const label = lecturerState === "loading" ? "Thinking…" : speaking ? "Speaking" : "Lecturer";
 
-  return createPortal(
+  const face = createPortal(
     status === "ready" ? (
       <div className="avatar-label">{label}</div>
     ) : (
@@ -106,5 +116,11 @@ export default function LecturerAvatar({ slots, chatOpen, lecturerState }) {
       </button>
     ),
     host.card
+  );
+  return (
+    <>
+      {face}
+      {debugOn && createPortal(<pre className="avatar-debug">{dbg}</pre>, document.body)}
+    </>
   );
 }
