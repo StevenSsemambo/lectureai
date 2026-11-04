@@ -1,5 +1,5 @@
 // Tests for src/avatar/lipsync.js and src/avatar/avatarBus.js (run: node .tests/t_avatar.mjs)
-import { buildTimeline, mouthAt, autoEmotion, planGestures, adaptMsPerUnit, unitIndexAt, MS_PER_UNIT_MIN, MS_PER_UNIT_MAX } from "../src/avatar/lipsync.js";
+import { buildTimeline, mouthAt, autoEmotion, planGestures, adaptMsPerUnit, unitIndexAt, planActions, MS_PER_UNIT_MIN, MS_PER_UNIT_MAX } from "../src/avatar/lipsync.js";
 import { avatarBus } from "../src/avatar/avatarBus.js";
 import { buildSpeechMap, positionFromFraction, nextWordT } from "../src/avatar/lipsync.js";
 import { analyseSamples } from "../src/avatar/envelope.js";
@@ -129,6 +129,26 @@ delete globalThis.localStorage;
 
 const s3 = []; const o3 = avatarBus.subscribe((t) => s3.push(t)); avatarBus.pieceEnd(); o3();
 ok(s3[0] === "pieceEnd", "the real end of a piece reaches the face");
+
+// ---- actions that follow the words ----
+const act = (txt) => planActions(txt, buildTimeline(txt));
+const kinds = (ev, k) => ev.filter((e) => e.kind === k);
+let ev = act("Hello everyone, welcome to the class.");
+ok(kinds(ev, "g").some((e) => e.g === "welcome" && e.s === "both") && kinds(ev, "f").some((e) => e.f === "smile"), "a greeting opens both hands and smiles");
+ev = act("Look at the diagram on the screen.");
+ok(kinds(ev, "g")[0].g === "point_slide" && kinds(ev, "gaze").some((e) => e.to === "slide"), "'look at the diagram' points at the slide and looks at it");
+ev = act("First, we declare the variable.");
+ok(kinds(ev, "g")[0].g === "c1", "'first' shows one finger");
+ev = act("Never forget the semicolon, it is a common mistake.");
+ok(kinds(ev, "g")[0].g === "stop" && kinds(ev, "h").some((e) => e.h === "shake") && kinds(ev, "f").some((e) => e.f === "furrow"), "'never' stops with a frown and a head shake");
+ev = act("Remember this key idea.");
+ok(kinds(ev, "g")[0].g === "beat" && kinds(ev, "h").some((e) => e.h === "nod"), "'remember' is a firm beat with a nod");
+ev = act("Why do we declare the type first?");
+ok(kinds(ev, "f").some((e) => e.f === "brow_up" || e.f === "think"), "a question lifts the brows or looks thoughtful");
+ev = act("Maybe, but it depends on the compiler and the system you use today.");
+ok(kinds(ev, "g").length <= 2 && ev.every((e, i) => i === 0 || e.t >= ev[i - 1].t), "at most two gestures, events in time order");
+ok(act("ok").length === 0 && planActions("hello", null).length === 0 && planActions("", buildTimeline("")).length === 0, "nothing to do when there is nothing to react to");
+{ const g = kinds(act("Look, then maybe think about big small things, and you will see."), "g"); ok(g.every((x, i) => i === 0 || Math.abs(x.t - g[i - 1].t) > 16), "gestures are spaced apart"); }
 
 console.log(`avatar: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

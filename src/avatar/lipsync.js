@@ -153,6 +153,60 @@ export function planGestures(text, tl) {
   return spaced.slice(0, 2);
 }
 
+
+// ---------- actions tied to the words (gestures, expressions, head, gaze) ----------
+// Each rule is [pattern, actions]. The action starts at the word that matched. Earlier rules win when two gestures compete.
+//   g = arm gesture (names from body.js POSES), s = "R" (her right hand) or "both"; f = a quick facial expression (amount, ms);
+//   h = head move (nod / shake / tilt); gaze = where the eyes go (slide / up / student).
+const G = (g, s = "R") => ({ kind: "g", g, s });
+const F = (f, amp, dur) => ({ kind: "f", f, amp, dur });
+const H = (h) => ({ kind: "h", h });
+const GZ = (to) => ({ kind: "gaze", to });
+export const ACTION_RULES = [
+  [/\b(look|see|notice|watch|slide|diagram|figure|table|chart|screen)\b/i, [G("point_slide"), GZ("slide")]],
+  [/\b(first|firstly|step one|number one)\b/i, [G("c1")]],
+  [/\b(second|secondly|step two|number two|two)\b/i, [G("c2")]],
+  [/\b(third|thirdly|step three|number three|three)\b/i, [G("c3")]],
+  [/\b(never|don'?t|do not|avoid|wrong|incorrect|mistake|error|bug|warning|careful|danger)\b/i, [G("stop"), F("furrow", 0.5, 1200), H("shake")]],
+  [/\b(important|key|essential|crucial|remember|must|always|critical|make sure|note that)\b/i, [G("beat"), F("furrow", 0.4, 1100), H("nod")]],
+  [/\b(hello|hi|welcome|good (?:morning|afternoon|evening|day))\b/i, [G("welcome", "both"), F("smile", 0.7, 1900), H("nod")]],
+  [/\b(maybe|perhaps|might|probably|depends|not sure|sometimes)\b/i, [G("shrug", "both"), F("brow_up", 0.5, 1100), H("tilt")]],
+  [/\b(big|large|huge|many|lots|wide|whole|entire)\b/i, [G("wide", "both")]],
+  [/\b(small|little|tiny|few|short)\b/i, [G("small", "both")]],
+  [/\b(but|however|although|whereas|instead|on the other hand)\b/i, [G("open", "both"), H("tilt")]],
+  [/\b(think|imagine|consider|wonder|suppose|why)\b/i, [G("together", "both"), F("think", 0.6, 1400), GZ("up")]],
+  [/\b(then|next|after that|afterwards|finally)\b/i, [G("next")]],
+  [/\b(you|your|yours)\b/i, [G("offer"), GZ("student")]],
+  [/\b(everyone|everybody|class|students)\b/i, [G("open", "both")]],
+  [/\b(great|excellent|well done|correct|exactly|perfect|nice|congratulations)\b/i, [F("smile", 0.7, 1500), H("nod")]],
+  [/\b(wow|amazing|incredible|surprising|surprisingly|interesting|actually)\b/i, [F("wide", 0.6, 1000)]],
+  [/\b(sorry|unfortunately|difficult|hard|struggle|tricky|confusing|problem)\b/i, [F("concern", 0.6, 1600), H("tilt")]],
+];
+
+// -> events sorted by timeline position: [{ t, kind: "g" | "f" | "h" | "gaze", ... }]. At most 2 gestures per piece, spaced apart.
+export function planActions(text, tl) {
+  const str = String(text || "");
+  if (!tl || !tl.u || !tl.u.length) return [];
+  const gestures = [], others = [];
+  ACTION_RULES.forEach(([re, acts], pri) => {
+    const m = re.exec(str);
+    if (!m) return;
+    const k = tl.u.findIndex((x) => x.ci >= m.index);
+    if (k < 0) return;
+    for (const a of acts) (a.kind === "g" ? gestures : others).push({ ...a, t: tl.u[k].t, pri });
+  });
+  if (/\?\s*$/.test(str)) {
+    gestures.push({ ...G("offer"), t: tl.total * 0.6, pri: 98 });
+    others.push({ ...F("brow_up", 0.5, 1200), t: tl.total * 0.8 }, { ...H("tilt"), t: tl.total * 0.8 });
+  }
+  if (/!\s*$/.test(str)) others.push({ ...F("smile", 0.5, 1000), t: tl.total * 0.85 });
+  if (!gestures.length && str.length > 80) gestures.push({ ...G("open"), t: tl.total * 0.45, pri: 99 });
+  gestures.sort((a, b) => a.pri - b.pri);
+  const chosen = [];
+  for (const g of gestures) if (chosen.length < 2 && chosen.every((x) => Math.abs(x.t - g.t) > 16)) chosen.push(g);
+  return [...chosen, ...others].sort((a, b) => a.t - b.t);
+}
+
 // After a piece ends naturally, learn the real speed (blend 40% old / 60% measured), kept in a sane range.
 export function adaptMsPerUnit(current, elapsedMs, totalUnits, rate = 1) {
   if (!(totalUnits > 0) || !(elapsedMs > 0)) return current;

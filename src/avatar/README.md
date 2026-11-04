@@ -32,3 +32,15 @@ Camera icon off = nothing loads. To remove entirely: revert the commit (or delet
 ## Licence — check before shipping commercially
 The model was exported from Ready Player Me (shut down 31 Jan 2026). Confirm its licence terms allow commercial redistribution,
 or replace the GLB with one you own (any humanoid GLB with ARKit/Oculus-viseme blendshapes works).
+
+## Natural motion: actions that follow the words (body.js, lipsync.js `planActions`)
+- `planActions` reads each spoken piece and plans actions at the exact word that triggers them: a gesture (greeting, pointing at the
+  slide, counting 1-2-3 with fingers, emphasis beat, "stop", shrug, hands wide/small, hands together), a quick facial expression
+  (smile, furrow, brows up, concern, thinking), a head move (nod, shake, tilt) and where the eyes go (slide, up, student).
+  Add words in `ACTION_RULES`. At most two gestures per piece, and none within ~2 s of the last (except beats, counting, pointing).
+- `body.js` controls the arms, which way each palm faces and how the fingers curl (relaxed, open, pointing, 1/2/3 fingers). It
+  measures the model's hands once (`buildRig`), so no hand-made bone numbers.
+- Every pose is MEASURED on the real model: `node .tests/t_body.mjs --verbose` checks that hands never pass through each other,
+  the body or the face (also on the way in and out), stay inside the side panel's picture, and that palms face where intended.
+  Add or change a pose in `POSES`, run it, and it says at once if a hand would go through something.
+- Pointing at the slide assumes the slide is on the student's left of the lecturer (the desktop rail layout).

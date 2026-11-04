@@ -9,9 +9,10 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import {
-  buildTimeline, mouthAt, autoEmotion, planGestures, adaptMsPerUnit, GESTURE_POSES, BASE_MS_PER_UNIT, clamp,
+  buildTimeline, mouthAt, autoEmotion, planActions, adaptMsPerUnit, BASE_MS_PER_UNIT, clamp,
   MS_PER_UNIT_MIN, MS_PER_UNIT_MAX, buildSpeechMap, positionFromFraction, nextWordT,
 } from "./lipsync.js";
+import { buildRig, applyArm, POSES } from "./body.js";
 import { analyseBlob } from "./envelope.js";
 import { getOffsetMs } from "./lipTuning.js";
 
@@ -56,19 +57,15 @@ const EMOTIONS = {
   thoughtful: { m: { browInnerUp: 0.3, browDownLeft: 0.25, browOuterUpRight: 0.25, ...both("mouthPress", 0.14), mouthLeft: 0.1 }, h: [0, 0.05] },
 };
 
-const REST = [0.14, -1, 0.05, 0.14, -0.55, 0.8];
-const dirs = (side, g) => { g = g || REST; return [new V3(side * g[0], g[1], g[2]), new V3(side * g[3], g[4], g[5])]; };
-
-// Turns `bone` so that the line bone -> child points along `dir` (blended by k).
-function aim(bone, child, dir, k) {
-  bone.updateWorldMatrix(true, true);
-  const bp = new V3().setFromMatrixPosition(bone.matrixWorld);
-  const cp = new V3().setFromMatrixPosition(child.matrixWorld);
-  const q = new Q().setFromUnitVectors(cp.sub(bp).normalize(), dir.clone().normalize());
-  const bq = bone.getWorldQuaternion(new Q());
-  const pq = bone.parent.getWorldQuaternion(new Q());
-  bone.quaternion.slerp(pq.invert().multiply(q).multiply(bq), k);
-}
+// quick facial expressions that come and go with single words (added on top of the mood)
+const PULSES = {
+  smile: { ...both("mouthSmile", 0.6), ...both("cheekSquint", 0.35), ...both("eyeSquint", 0.15) },
+  furrow: { ...both("browDown", 0.5), ...both("eyeSquint", 0.15), ...both("mouthPress", 0.1) },
+  brow_up: { browInnerUp: 0.5, ...both("browOuterUp", 0.5) },
+  wide: { ...both("eyeWide", 0.5), browInnerUp: 0.45, ...both("browOuterUp", 0.4) },
+  concern: { browInnerUp: 0.7, ...both("mouthFrown", 0.35), ...both("browDown", 0.1) },
+  think: { browInnerUp: 0.25, browDownLeft: 0.25, browOuterUpRight: 0.3, mouthLeft: 0.1 },
+};
 
 export class LecturerFace {
   constructor({ container, modelUrl, framing = "bust", onStatus, reducedMotion = false }) {
@@ -86,12 +83,13 @@ export class LecturerFace {
     this.blinkAt = 2500; this.blinkT = -1;
     this.hx = 0; this.hz = 0; this.nodT = -1e9;
     this.pose = { Left: null, Right: null };
+    this.rig = null; this.pulses = []; this.lastGestureAt = -1e9; this.shakeT = -1e9; this.tiltT = -1e9; this.gazeHold = null; this.yawBias = 0;
     this.armsActiveUntil = 0;
 
     // speaking state
     this.speaking = false; this.thinking = false; this.speechEmo = "neutral";
     this.tl = null; this.tlStart = 0; this.t0 = 0; this.rate = 1; this.fixedMs = 0; this.audio = null;
-    this.gestures = []; this.gi = 0; this.pending = null;
+    this.actions = []; this.gi = 0; this.pending = null;
     this.baseMs = BASE_MS_PER_UNIT; this.voiceKey = null; this.calDirty = false;
     this.bndKnown = null;   // does this voice send word events? (null = not known yet)
     this.bndSeen = false; this.nb = 0; this.awaitFirst = false; this.awaitAt = 0; // this piece
@@ -151,6 +149,7 @@ export class LecturerFace {
     if (!bones.LeftArm || !bones.Head) throw new Error("avatar needs a standard humanoid skeleton");
     this.scene.add(model);
     this.model = model; this.morphs = morphs; this.bones = bones;
+    this.rig = buildRig(model, bones); // measures her hands and fingers once
     for (let i = 0; i < 4; i++) this._armsTo(1); // settle into the resting pose
     for (const n of ["Spine1", "Spine2", "Neck", "Head"]) if (bones[n]) this.base[n] = bones[n].quaternion.clone();
     model.updateWorldMatrix(true, true);
@@ -161,12 +160,7 @@ export class LecturerFace {
   }
 
   _armsTo(k) {
-    const B = this.bones;
-    for (const [n, s] of [[LEFT, 1], [RIGHT, -1]]) {
-      const d = dirs(s);
-      aim(B[n + "Arm"], B[n + "ForeArm"], d[0], k);
-      aim(B[n + "ForeArm"], B[n + "Hand"], d[1], k);
-    }
+    for (const n of [LEFT, RIGHT]) applyArm(this.rig, n, POSES.rest, k);
   }
 
   // ---------- size / framing ----------
@@ -279,7 +273,7 @@ export class LecturerFace {
     }
     this.offsetMs = getOffsetMs();
     this.tl = buildTimeline(text);
-    this.gestures = planGestures(text, this.tl); this.gi = 0;
+    this.actions = planActions(text, this.tl); this.gi = 0;
     this.rate = rate || 1;
     this.fixedMs = durationMs > 0 && this.tl.total > 0 ? durationMs / this.tl.total : 0;
     this.audio = audio || null;
@@ -373,7 +367,7 @@ export class LecturerFace {
     // mouth
     if (this.speaking && this.tl) {
       const p = this._position(now);
-      while (this.gi < this.gestures.length && p >= this.gestures[this.gi].t) this._fire(this.gestures[this.gi++], now);
+      while (this.gi < this.actions.length && p >= this.actions[this.gi].t) this._act(this.actions[this.gi++], now);
       const m = mouthAt(this.tl, p);
       if (m) {
         const lv = this.audio && this.env ? clamp(0.6 + 0.55 * this.level, 0.5, 1.15) : 1; // louder sound, wider mouth
@@ -395,7 +389,11 @@ export class LecturerFace {
 
     // gaze: mostly on the student, now and then a glance away (up and aside when thinking)
     const g = this.gaze;
-    if (now > g.next) {
+    const gh = this.gazeHold && now < this.gazeHold.until ? this.gazeHold : null;
+    if (gh) { // looking where the words point: at the slide, up while thinking, back at the student
+      g.tx = gh.to === "slide" ? -0.6 : gh.to === "up" ? 0.25 : 0; g.ty = gh.to === "slide" ? -0.05 : gh.to === "up" ? 0.4 : 0;
+      g.next = Math.max(g.next, gh.until);
+    } else if (now > g.next) {
       const away = Math.random() < 0.2 || (emoName === "thoughtful" && Math.random() < 0.5);
       g.tx = away ? (Math.random() - 0.5) * 0.7 : 0;
       g.ty = away ? (emoName === "thoughtful" ? 0.35 : (Math.random() - 0.5) * 0.4) : 0;
@@ -408,6 +406,15 @@ export class LecturerFace {
     T.eyeLookUpLeft = T.eyeLookUpRight = Math.max(0, g.y);
     T.eyeLookDownLeft = T.eyeLookDownRight = Math.max(0, -g.y);
 
+    // quick expressions that go with single words
+    if (this.pulses.length) {
+      this.pulses = this.pulses.filter((q) => now - q.t < q.dur + 700);
+      for (const q of this.pulses) {
+        const el = now - q.t, env = el < 150 ? el / 150 : el < q.dur ? 1 : Math.max(0, 1 - (el - q.dur) / 600), def = PULSES[q.f];
+        for (const k in def) T[k] = Math.min(1, (T[k] || 0) + def[k] * q.amp * env * (this.reduced ? 0.5 : 1) * (this.speaking && /smile|press|frown/i.test(k) ? 0.7 : 1));
+      }
+    }
+
     // smooth + apply
     const cur = this.cur;
     for (const n in T) if (!(n in cur)) cur[n] = 0;
@@ -419,18 +426,15 @@ export class LecturerFace {
 
     // arms: only worked on while a gesture is running or just finished
     if (now < this.armsActiveUntil) {
-      for (const [n, s] of [[LEFT, 1], [RIGHT, -1]]) {
+      for (const n of [LEFT, RIGHT]) {
         const ps = this.pose[n], act = ps && now < ps.until;
-        let gp = null;
+        let def = POSES.rest, bump = 0;
         if (act) {
           const a = (now - ps.t) / 1000;
-          gp = ps.g.slice();
-          const bump = ps.beat ? 0.2 * Math.exp(-a * 5) : 0;
-          gp[4] += 0.05 * Math.sin(a * 5) + bump; gp[1] -= bump * 0.6;
+          def = ps.def;
+          bump = (ps.beat ? 0.2 * Math.exp(-a * 5) : 0) + 0.04 * Math.sin(a * 4 + (n === LEFT ? 1.3 : 0)); // the stroke of a beat, then a faint life
         } else if (ps) this.pose[n] = null;
-        const d = dirs(s, gp), k = 1 - Math.exp(-dt * (act ? 6 : 3));
-        aim(B[n + "Arm"], B[n + "ForeArm"], d[0], k);
-        aim(B[n + "ForeArm"], B[n + "Hand"], d[1], k);
+        applyArm(this.rig, n, def, 1 - Math.exp(-dt * (act ? 6 : 3)), bump);
       }
     }
 
@@ -440,8 +444,12 @@ export class LecturerFace {
     const nod = ns < 1 ? 0.07 * Math.sin(Math.PI * ns) * mo : 0;
     this.hx += (em.h[0] - this.hx) * (1 - Math.exp(-dt / 0.4));
     this.hz += (em.h[1] - this.hz) * (1 - Math.exp(-dt / 0.4));
-    const yaw = 0.07 * a * Math.sin(t / 2600) + 0.035 * mo * Math.sin(t / 1500);
-    const e = new THREE.Euler(this.hx + nod + 0.015 * mo * Math.sin(t / 1900) + (cur.jawOpen || 0) * 0.08, yaw, this.hz + 0.015 * mo * Math.sin(t / 2100));
+    const gz = this.gazeHold && now < this.gazeHold.until && this.gazeHold.to === "slide";
+    this.yawBias += ((gz ? -0.3 : 0) - this.yawBias) * (1 - Math.exp(-dt / 0.3)); // turns her head a little towards the slide when she points at it
+    const sk = (now - this.shakeT) / 800, shake = sk < 1 ? 0.13 * Math.sin(sk * Math.PI * 3) * (1 - sk) * mo : 0;
+    const tk = (now - this.tiltT) / 1300, tilt = tk < 1 ? 0.09 * Math.sin(Math.PI * tk) * mo : 0;
+    const yaw = 0.07 * a * Math.sin(t / 2600) + 0.035 * mo * Math.sin(t / 1500) + shake + this.yawBias * this.rig.yawSign * mo;
+    const e = new THREE.Euler(this.hx + nod + 0.015 * mo * Math.sin(t / 1900) + (cur.jawOpen || 0) * 0.08, yaw, this.hz + tilt + 0.015 * mo * Math.sin(t / 2100));
     B.Head.quaternion.copy(this.base.Head).multiply(new Q().setFromEuler(e));
     if (B.Neck) B.Neck.quaternion.copy(this.base.Neck).multiply(new Q().setFromEuler(new THREE.Euler(this.hx * 0.4 + nod * 0.3, yaw * 0.4, this.hz * 0.3)));
     if (B.Spine2) B.Spine2.quaternion.copy(this.base.Spine2).multiply(new Q().setFromEuler(new THREE.Euler(0.012 * mo * Math.sin(t / 1050) + (emoName === "serious" ? 0.03 : 0), 0.03 * mo * Math.sin(t / 3300), 0.008 * mo * Math.sin(t / 2700))));
@@ -449,13 +457,20 @@ export class LecturerFace {
     this.renderer.render(this.scene, this.cam);
   }
 
-  _fire(ev, now) {
-    if (this.reduced) return; // no arm gestures for people who asked for less motion
-    for (const side of ev.s === "both" ? [LEFT, RIGHT] : [RIGHT]) {
-      this.pose[side] = { g: GESTURE_POSES[ev.g], t: now, until: now + 1500, beat: ev.g === "beat" || ev.g === "count" };
-    }
-    this.armsActiveUntil = now + 1500 + 1500; // gesture, then time to settle back to rest
-    if (ev.g === "beat" || ev.g === "ask" || ev.g === "count") this.nodT = now;
+  // something planned from the words happens now: a gesture, a quick expression, a head move or where the eyes go
+  _act(ev, now) {
+    if (ev.kind === "g") {
+      const def = POSES[ev.g];
+      if (!def || this.reduced) return; // no arm gestures for people who asked for less motion
+      const strong = def.beat || /^(c[123]|point_slide)$/.test(ev.g);
+      if (!strong && now - this.lastGestureAt < 2200) return; // not a new gesture every second
+      this.lastGestureAt = now;
+      for (const side of ev.s === "both" ? [LEFT, RIGHT] : [RIGHT]) this.pose[side] = { def, t: now, until: now + def.dur, beat: !!def.beat };
+      this.armsActiveUntil = now + def.dur + 1500; // the gesture, then time to settle back to rest
+      if (def.beat) this.nodT = now;
+    } else if (ev.kind === "f") this.pulses.push({ f: ev.f, amp: ev.amp, t: now, dur: ev.dur });
+    else if (ev.kind === "h") { if (ev.h === "nod") this.nodT = now; else if (ev.h === "shake") this.shakeT = now; else this.tiltT = now; }
+    else if (ev.kind === "gaze") this.gazeHold = { to: ev.to, until: now + (ev.to === "slide" ? 1600 : 1000) };
   }
 
   // ---------- cleanup ----------
