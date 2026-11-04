@@ -19,7 +19,11 @@ the chat; on phones/tablets it is a small round tile at the end of the Slides / 
 - `public/avatars/avatar-f1.glb` the model (2.3 MB). Fetched only when the camera is on; cached for offline after first use; NOT precached.
 
 ## Sync
-- Browser voice: each queued piece starts the timeline on its `start` event; word boundaries re-sync; speed is learned per voice.
+- Browser voice: the mouth starts only on evidence of sound. The first piece of a line waits for the voice's first word event
+  (up to 0.6 s, 0.8 s for voices known to send them); voices known to send none get a fixed 450 ms lag; later pieces start at once.
+  A queued piece with no sign of sound starts the mouth only after 3.5 s. Word events re-sync and lock to each word (released after
+  0.9 s of silence); if the guess runs out the mouth keeps talking up to 4 s; speed and "sends word events" are learned per voice.
+  The student's "Mouth timing" slider (Voice panel) shifts everything; `?lipdebug` shows the live numbers.
 - ElevenLabs: the face reads the `<audio>` element's own clock, so pause / stall / resume stay in sync.
 
 ## Switching it off / removing it

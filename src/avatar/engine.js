@@ -34,6 +34,13 @@ function saveCal(voice, ms, bnd) {
   } catch (e) { /* storage unavailable: fine */ }
 }
 
+// How long the mouth waits before starting a LINE of speech (the first piece), because the browser's "started" event can
+// come well before any sound (network voices fetch their audio first). A word event, when the voice sends them, ends the wait.
+const WAIT_FIRST_WORD_MS = 600;       // voice not known yet
+const WAIT_FIRST_WORD_KNOWN_MS = 800; // voice known to send word events
+const NO_EVENT_LAG_MS = 450;          // voice known NOT to send word events: nothing to wait for, so a fixed lag
+const PENDING_FALLBACK_MS = 3500;     // a piece was queued but the voice never said it started: only then start on a guess
+
 const { Vector3: V3, Quaternion: Q } = THREE;
 const LEFT = "Left", RIGHT = "Right";
 const both = (n, v) => ({ [n + LEFT]: v, [n + RIGHT]: v });
@@ -89,6 +96,7 @@ export class LecturerFace {
     this.bndKnown = null;   // does this voice send word events? (null = not known yet)
     this.bndSeen = false; this.nb = 0; this.awaitFirst = false; this.awaitAt = 0; // this piece
     this.offsetMs = 0; this.overrunMs = 0; this.lastPiece = null; this.envState = "none";
+    this.lineActive = false; this.awaitCap = 0; this.leadMs = 0; // lineActive: a line of speech is in progress (pieces after the first need no wait)
     this.lastB = null; this.wordLocked = false; this.nextT = 0; // browser voice: word boundaries seen in this piece
     this.env = null; this.map = null; this.level = 0; this.jobs = new WeakMap(); // recorded voice: measured loudness
 
@@ -208,11 +216,14 @@ export class LecturerFace {
         break;
       }
       case "boundary": {
-        if (!this.tl || this.fixedMs || this.audio || d.kind === "sentence") break; // recordings are timed by the audio itself
+        if (d.kind === "sentence") break;
+        if (!this.tl && this.pending) { const p = this.pending; this.pending = null; this._begin(p, now); } // sound is certainly playing
+        if (!this.tl || this.fixedMs || this.audio) break; // recordings are timed by the audio itself
         const k = this.tl.u.findIndex((x) => x.ci >= d.charIndex);
         if (k < 0) break;
         const ut = this.tl.u[k].t;
         this.nb++;
+        if (this.nb === 1) this.leadMs = Math.round(now - this.t0); // how far ahead of the first word the 'started' event came
         if (!this.bndSeen) { this.bndSeen = true; if (this.bndKnown !== true) { this.bndKnown = true; this.calDirty = true; } }
         if (this.lastB && ut > this.lastB.t + 0.5) {
           // how fast is this voice really talking? learn it from the time between two words, right now
@@ -251,7 +262,8 @@ export class LecturerFace {
       `${this.audio ? "recording" : "browser voice"}: ${this.voiceKey || "-"}`,
       `word events: ${this.bndKnown === true ? "yes" : this.bndKnown === false ? "NO" : "?"}   offset ${this.offsetMs} ms   speed ${this.baseMs.toFixed(0)} ms/unit   measured: ${this.envState}`,
       lp ? `last piece: guessed ${lp.estMs} ms, took ${lp.actMs} ms, words heard ${lp.nb}, ran past ${lp.over} ms` : "last piece: -",
-    ].join("\n");
+      lp && lp.nb ? `'started' event came ${lp.lead} ms before the first word` : "",
+    ].filter(Boolean).join("\n");
   }
 
   _msPerUnit() { return this.fixedMs || clamp(this.baseMs / (this.rate || 1), 30, 160); }
@@ -272,10 +284,16 @@ export class LecturerFace {
     this.audio = audio || null;
     this.t0 = now;
     this.tlStart = now + (audio ? 0 : this.offsetMs);
-    // A voice known to send word events: its first one marks when the sound really starts, so wait for it (the "started"
-    // event can come well before the audio). Others start on "started" plus the student's timing offset.
-    this.awaitFirst = !audio && this.bndKnown === true; this.awaitAt = now;
-    this.bndSeen = false; this.nb = 0; this.overrunMs = 0;
+    // The "started" event can come well before the sound. The first piece of a line therefore waits for the voice's first
+    // word event (which proves sound is playing); a voice known to send none gets a fixed lag instead. Pieces after the
+    // first follow straight on from the previous one, so they start at once.
+    const firstOfLine = !this.lineActive; this.lineActive = true;
+    this.awaitFirst = false; this.awaitAt = now; this.awaitCap = 0;
+    if (!audio && firstOfLine) {
+      if (this.bndKnown === false) this.tlStart += NO_EVENT_LAG_MS;
+      else { this.awaitFirst = true; this.awaitCap = this.bndKnown === true ? WAIT_FIRST_WORD_KNOWN_MS : WAIT_FIRST_WORD_MS; }
+    }
+    this.bndSeen = false; this.nb = 0; this.overrunMs = 0; this.leadMs = 0;
     this.speechEmo = autoEmotion(text) || "neutral";
     this.speaking = true;
   }
@@ -287,8 +305,9 @@ export class LecturerFace {
       if (!this.bndSeen) { this.baseMs = adaptMsPerUnit(this.baseMs, now - this.t0, this.tl.total, this.rate); this.calDirty = true; }
       // a long piece that ended without a single word event: this voice does not send them
       if (this.voiceKey && !this.bndSeen && this.tl.u.length >= 30 && now - this.t0 > 600 && this.bndKnown !== false) { this.bndKnown = false; this.calDirty = true; }
-      this.lastPiece = { estMs: Math.round(this.tl.total * this._msPerUnit()), actMs: Math.round(now - this.t0), nb: this.nb, over: Math.round(this.overrunMs) };
+      this.lastPiece = { estMs: Math.round(this.tl.total * this._msPerUnit()), actMs: Math.round(now - this.t0), nb: this.nb, over: Math.round(this.overrunMs), lead: this.leadMs };
     }
+    if (!keepSpeaking) this.lineActive = false;
     this.tl = null; this.t0 = 0; this.audio = null; this.fixedMs = 0; this.envState = "none"; this.awaitFirst = false; this.overrunMs = 0;
     this.env = null; this.map = null; this.level = 0; this.lastB = null; this.wordLocked = false;
     if (!keepSpeaking) { this.speaking = false; this.pending = null; this.speechEmo = "neutral"; }
@@ -313,7 +332,7 @@ export class LecturerFace {
       return (ct / dur) * this.tl.total; // not measured: stretch the text evenly over the recording
     }
     if (this.awaitFirst) {
-      if (now - this.awaitAt < 800) return -1; // waiting for the voice's first word event
+      if (now - this.awaitAt < this.awaitCap) return -1; // waiting for the voice's first word event
       this.awaitFirst = false; this.tlStart = now + this.offsetMs; // it never came: start anyway
     }
     const ms = this._msPerUnit();
@@ -342,7 +361,7 @@ export class LecturerFace {
     const dt = Math.min(0.05, (now - this.last) / 1000);
     this.last = now; this.lastRender = now;
 
-    if (this.pending && now - this.pending.at > 1200) { const p = this.pending; this.pending = null; this._begin(p, now); } // the voice never said "started"
+    if (this.pending && now - this.pending.at > PENDING_FALLBACK_MS) { const p = this.pending; this.pending = null; this._begin(p, now); } // the voice never said "started"
 
     const B = this.bones, T = {};
     const emoName = this.speaking ? this.speechEmo : this.thinking ? "thoughtful" : "neutral";
