@@ -9,6 +9,7 @@ import { LecturerFace } from "./engine.js";
 import { avatarBus } from "./avatarBus.js";
 import { logClientError } from "../errorLogging.jsx";
 import { debugEnabled } from "./lipTuning.js";
+import { waitForSpeech } from "./startGate.js";
 
 const BASE = (typeof import.meta !== "undefined" && import.meta.env && import.meta.env.BASE_URL) || "/";
 const MODEL_URL = `${BASE}avatars/avatar-f1.glb`;
@@ -58,9 +59,17 @@ export default function LecturerAvatar({ slots, chatOpen, lecturerState }) {
 
   useEffect(() => () => { if (host.card.parentNode) host.card.parentNode.removeChild(host.card); }, [host]);
 
+  // Do not start downloading the face until the lecture's voice has begun (or 6 s have passed): the two must not compete
+  // for a weak connection. A student who tapped "Show the lecturer" is not made to wait.
+  const [settled, setSettled] = useState(false);
+  useEffect(() => {
+    if (!run || settled) return undefined;
+    return waitForSpeech(avatarBus, () => setSettled(true), 6000);
+  }, [run, settled]);
+
   // the engine lives only while this component is mounted (camera on)
   useEffect(() => {
-    if (!run) return undefined;
+    if (!run || !settled) return undefined;
     let cancelled = false, face = null, off = null;
     setStatus("loading");
     try {
@@ -84,7 +93,7 @@ export default function LecturerAvatar({ slots, chatOpen, lecturerState }) {
       setStatus("error");
     });
     return () => { cancelled = true; if (off) off(); face.dispose(); faceRef.current = null; };
-  }, [run, host]);
+  }, [run, settled, host]);
 
   // thinking while the AI is preparing an answer; amber glow while speaking (same cue as the old tile)
   const speaking = lecturerState === "explaining" || lecturerState === "answering";
@@ -100,7 +109,7 @@ export default function LecturerAvatar({ slots, chatOpen, lecturerState }) {
     return () => clearInterval(id);
   }, [debugOn]);
 
-  const start = () => setRun((r) => r + 1);
+  const start = () => { setSettled(true); setRun((r) => r + 1); };
   const label = lecturerState === "loading" ? "Thinking…" : speaking ? "Speaking" : "Lecturer";
 
   const face = createPortal(

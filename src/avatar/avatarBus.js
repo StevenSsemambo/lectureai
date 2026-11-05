@@ -30,6 +30,8 @@ export const avatarBus = {
   recording: (text, { durationMs, audio, rate, blob } = {}) => emit("recording", { text, durationMs, audio, rate, blob }),
 
   pieceEnd: () => emit("pieceEnd"),  // the voice really finished that piece: the mouth shuts at once, however long the guess was
+  trouble: (kind) => emit("trouble", { kind }),  // the voice had a problem (dropped / stalled / error / gave-up): diagnostics only
+
   end: () => emit("end"),    // the line finished
   stop: () => emit("stop"),  // cut off (student asked something, paused, moved slide)
 };

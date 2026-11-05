@@ -94,6 +94,7 @@ export class LecturerFace {
     this.bndKnown = null;   // does this voice send word events? (null = not known yet)
     this.bndSeen = false; this.nb = 0; this.awaitFirst = false; this.awaitAt = 0; // this piece
     this.offsetMs = 0; this.overrunMs = 0; this.lastPiece = null; this.envState = "none";
+    this.troubles = []; // last few voice problems, for the debug box
     this.lineActive = false; this.awaitCap = 0; this.leadMs = 0; // lineActive: a line of speech is in progress (pieces after the first need no wait)
     this.lastB = null; this.wordLocked = false; this.nextT = 0; // browser voice: word boundaries seen in this piece
     this.env = null; this.map = null; this.level = 0; this.jobs = new WeakMap(); // recorded voice: measured loudness
@@ -126,7 +127,7 @@ export class LecturerFace {
 
   // ---------- loading ----------
   async load() {
-    const res = await fetch(this.modelUrl);
+    const res = await fetch(this.modelUrl, { priority: "low" }); // never ahead of the lecture's own audio
     if (!res.ok) throw new Error("avatar model " + res.status);
     const buf = await res.arrayBuffer();
     if (this.disposed) return;
@@ -195,6 +196,7 @@ export class LecturerFace {
     switch (type) {
       case "piece": this.pending = { text: d.text, rate: d.rate, voice: d.voice, at: now }; break;
       case "pieceStart": this.pending = null; this._begin({ text: d.text, rate: d.rate, voice: d.voice }, now); break;
+      case "trouble": this.troubles.push(d.kind); if (this.troubles.length > 6) this.troubles.shift(); break;
       case "recordingReady": this._analyse(d.blob); break; // measure it while it is still being set up
       case "recording": {
         this.pending = null;
@@ -258,6 +260,7 @@ export class LecturerFace {
       `word events: ${this.bndKnown === true ? "yes" : this.bndKnown === false ? "NO" : "?"}   offset ${this.offsetMs} ms   speed ${this.baseMs.toFixed(0)} ms/unit   measured: ${this.envState}`,
       lp ? `last piece: guessed ${lp.estMs} ms, took ${lp.actMs} ms, words heard ${lp.nb}, ran past ${lp.over} ms` : "last piece: -",
       lp && lp.nb ? `'started' event came ${lp.lead} ms before the first word` : "",
+      this.troubles.length ? `voice trouble (oldest first): ${this.troubles.join(", ")}` : "",
     ].filter(Boolean).join("\n");
   }
 

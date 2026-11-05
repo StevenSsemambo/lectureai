@@ -1,6 +1,7 @@
 // Tests for src/avatar/lipsync.js and src/avatar/avatarBus.js (run: node .tests/t_avatar.mjs)
 import { buildTimeline, mouthAt, autoEmotion, planGestures, adaptMsPerUnit, unitIndexAt, planActions, MS_PER_UNIT_MIN, MS_PER_UNIT_MAX } from "../src/avatar/lipsync.js";
 import { avatarBus } from "../src/avatar/avatarBus.js";
+import { waitForSpeech } from "../src/avatar/startGate.js";
 import { buildSpeechMap, positionFromFraction, nextWordT } from "../src/avatar/lipsync.js";
 import { analyseSamples } from "../src/avatar/envelope.js";
 import { getOffsetMs, setOffsetMs, OFFSET_MIN, OFFSET_MAX } from "../src/avatar/lipTuning.js";
@@ -149,6 +150,22 @@ ev = act("Maybe, but it depends on the compiler and the system you use today.");
 ok(kinds(ev, "g").length <= 2 && ev.every((e, i) => i === 0 || e.t >= ev[i - 1].t), "at most two gestures, events in time order");
 ok(act("ok").length === 0 && planActions("hello", null).length === 0 && planActions("", buildTimeline("")).length === 0, "nothing to do when there is nothing to react to");
 { const g = kinds(act("Look, then maybe think about big small things, and you will see."), "g"); ok(g.every((x, i) => i === 0 || Math.abs(x.t - g[i - 1].t) > 16), "gestures are spaced apart"); }
+// ---- the face must not download before the voice has started ----
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+{
+  let n = 0; const cancel0 = waitForSpeech(avatarBus, () => n++, 40);
+  ok(avatarBus.hasListeners(), "gate listens while waiting");
+  avatarBus.piece("x", 1); avatarBus.end(); avatarBus.recordingReady({}); avatarBus.trouble("dropped");
+  ok(n === 0, "queued pieces, line ends, recordings arriving and troubles do not release the gate");
+  avatarBus.pieceStart("Hello", 1); avatarBus.pieceStart("Hello again", 1);
+  ok(n === 1, "the first real start of speech releases it, exactly once");
+  ok(!avatarBus.hasListeners(), "…and it stops listening");
+  await sleep(80); ok(n === 1, "the timeout does not fire it a second time");
+  let b = 0; waitForSpeech(avatarBus, () => b++, 1000); avatarBus.boundary(0, "word"); ok(b === 1, "a word event releases it");
+  let r = 0; waitForSpeech(avatarBus, () => r++, 1000); avatarBus.recording("x", {}); ok(r === 1, "a recording playing releases it");
+  let t = 0; waitForSpeech(avatarBus, () => t++, 30); await sleep(80); ok(t === 1 && !avatarBus.hasListeners(), "nothing said for the timeout: it releases anyway (e.g. lecture paused)");
+  let c = 0; const cancel = waitForSpeech(avatarBus, () => c++, 30); cancel(); await sleep(80); avatarBus.pieceStart("x", 1); ok(c === 0 && !avatarBus.hasListeners(), "cancelled (camera switched off): never fires, no listener left behind");
+}
 
 console.log(`avatar: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

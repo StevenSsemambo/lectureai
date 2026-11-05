@@ -24,6 +24,8 @@ the chat; on phones/tablets it is a small round tile at the end of the Slides / 
   A queued piece with no sign of sound starts the mouth only after 3.5 s. Word events re-sync and lock to each word (released after
   0.9 s of silence); if the guess runs out the mouth keeps talking up to 4 s; speed and "sends word events" are learned per voice.
   The student's "Mouth timing" slider (Voice panel) shifts everything; `?lipdebug` shows the live numbers.
+- Loading: the face does not start downloading until the voice has actually started (or 6 s), and the model is fetched at low priority,
+  so it never competes with the lecture's own audio. The face never changes how the browser voice is driven (piece sizes etc. are the app's own).
 - ElevenLabs: the face reads the `<audio>` element's own clock, so pause / stall / resume stay in sync.
 
 ## Switching it off / removing it

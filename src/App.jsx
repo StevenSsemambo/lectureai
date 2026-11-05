@@ -4064,8 +4064,6 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
         speakWithBrowserVoice(window.speechSynthesis, SpeechSynthesisUtterance, speakText, {
           rate: voicePrefsRef.current.rate || 1,
           voice: chosen,
-          // with the face on, device voices are spoken sentence by sentence (not in one 600-character go): every piece start/end re-syncs the mouth
-          maxPiece: chosen && chosen.localService === true && avatarBus.hasListeners() ? 220 : undefined,
           onStart: () => markStart("browser"),
           onPiece: (i, n, pieceText) => avatarBus.piece(pieceText, voicePrefsRef.current.rate || 1, chosen && (chosen.voiceURI || chosen.name)),
           onPieceStart: (i, pieceText) => avatarBus.pieceStart(pieceText, voicePrefsRef.current.rate || 1, chosen && (chosen.voiceURI || chosen.name)),
@@ -4074,6 +4072,7 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
           shouldStop: () => !stillMine(),
           onTrouble: (kind) => {
             logTiming("tts_trouble", { provider: "browser", client_ms: Math.round(performance.now() - tSpeak), chars: text.length, extra: { kind } });
+            avatarBus.trouble(kind); // (only shown in the ?lipdebug box: which kind of failure the voice had)
             if (kind === "gave-up") setTtsNotice("The browser voice stopped responding, so the lecturer is continuing on screen. Reloading the page usually brings it back.");
           },
         }).then((finished) => {
