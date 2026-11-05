@@ -1,6 +1,7 @@
 // Tests for src/avatar/lipsync.js and src/avatar/avatarBus.js (run: node .tests/t_avatar.mjs)
 import { buildTimeline, mouthAt, autoEmotion, planGestures, adaptMsPerUnit, unitIndexAt, planActions, MS_PER_UNIT_MIN, MS_PER_UNIT_MAX } from "../src/avatar/lipsync.js";
 import { avatarBus } from "../src/avatar/avatarBus.js";
+import { getAvatarEnabled, setAvatarEnabled } from "../src/avatar/avatarSwitch.js";
 import { waitForSpeech } from "../src/avatar/startGate.js";
 import { buildSpeechMap, positionFromFraction, nextWordT } from "../src/avatar/lipsync.js";
 import { analyseSamples } from "../src/avatar/envelope.js";
@@ -165,6 +166,20 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   let r = 0; waitForSpeech(avatarBus, () => r++, 1000); avatarBus.recording("x", {}); ok(r === 1, "a recording playing releases it");
   let t = 0; waitForSpeech(avatarBus, () => t++, 30); await sleep(80); ok(t === 1 && !avatarBus.hasListeners(), "nothing said for the timeout: it releases anyway (e.g. lecture paused)");
   let c = 0; const cancel = waitForSpeech(avatarBus, () => c++, 30); cancel(); await sleep(80); avatarBus.pieceStart("x", 1); ok(c === 0 && !avatarBus.hasListeners(), "cancelled (camera switched off): never fires, no listener left behind");
+}
+
+// ---- master switch: off by default, remembered, URL flag applied once ----
+{
+  const store = new Map(); const events = [];
+  globalThis.localStorage = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) };
+  globalThis.window = { location: { search: "" }, dispatchEvent: (e) => events.push(e.type), addEventListener() {}, removeEventListener() {} };
+  globalThis.Event = class { constructor(t) { this.type = t; } };
+  ok(getAvatarEnabled() === false, "the face is OFF by default");
+  setAvatarEnabled(true); ok(getAvatarEnabled() === true && events.includes("semai-avatar-switch"), "switching on is remembered and announced to the app");
+  setAvatarEnabled(false); ok(getAvatarEnabled() === false, "switching off is remembered");
+  globalThis.localStorage = { getItem() { throw new Error("blocked"); }, setItem() { throw new Error("blocked"); } };
+  ok(getAvatarEnabled() === false && (setAvatarEnabled(true), true), "storage blocked: off, and no error");
+  delete globalThis.localStorage; delete globalThis.window; delete globalThis.Event;
 }
 
 console.log(`avatar: ${pass} passed, ${fail} failed`);

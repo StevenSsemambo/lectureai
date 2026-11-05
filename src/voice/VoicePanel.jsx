@@ -1,5 +1,6 @@
 import React, { useEffect, useRef } from "react";
 import LipSyncTuner from "../avatar/LipSyncTuner.jsx";
+import AvatarSwitch from "../avatar/AvatarSwitch.jsx";
 import { RATE_MIN, RATE_MAX, RATE_PRESETS, classifyVoice, voicesForLanguage, genderAvailable, rateLabel, clampRate } from "./voicePrefs.js";
 
 const GENDERS = [["any", "Any"], ["female", "Female"], ["male", "Male"]];
@@ -63,6 +64,7 @@ export default function VoicePanel({ open, onClose, prefs, onChange, voices, lan
           </>
         )}
 
+        <AvatarSwitch />
         <LipSyncTuner />
 
         <div className="voice-actions">

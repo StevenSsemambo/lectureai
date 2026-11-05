@@ -36,6 +36,7 @@ import { milestoneFor, milestoneLine, MAX_MILESTONES_PER_LECTURE } from "./perso
 import { FEEL_CHOICES, feelThanks } from "./persona/feel.js";
 import { speakWithBrowserVoice, remainingFrom } from "./voice/speech.js";
 import AvatarGate from "./avatar/AvatarGate.jsx";
+import { useAvatarEnabled } from "./avatar/avatarSwitch.js";
 import { avatarBus } from "./avatar/avatarBus.js";
 import { loadPrefs as loadVoicePrefs, savePrefs as saveVoicePrefs, chooseVoice, clampRate } from "./voice/voicePrefs.js";
 import { createSessionManager, SessionExpiredError } from "./authSession.js";
@@ -3509,7 +3510,8 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
   const avatarRailRef = useRef(null);
   const avatarInlineRef = useRef(null);
   const avatarSlots = useMemo(() => ({ rail: avatarRailRef, inline: avatarInlineRef }), []);
-  const avatarOn = camOn && !avatarFailed;
+  const avatarEnabled = useAvatarEnabled(); // master switch in the Voice panel (off by default)
+  const avatarOn = camOn && avatarEnabled && !avatarFailed;
   useEffect(() => { if (!camOn) setAvatarFailed(false); }, [camOn]); // switching the camera off and on tries again
   const [interrupted, setInterrupted] = useState(false);
   const [isListening, setIsListening] = useState(false);
