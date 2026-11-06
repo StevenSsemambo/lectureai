@@ -11,7 +11,7 @@ export default function AvatarSwitch() {
         Show the lecturer's face
       </label>
       <p className="voice-note">
-        Uses extra data (about 2.3 MB the first time), battery and memory, and appears when the camera icon is on. If the voice ever stops working, switch this off first.
+        Uses extra data (about 2.3 MB the first time), battery and memory, and appears when the camera icon is on. If the voice ever stops working, try switching this off.
       </p>
     </>
   );

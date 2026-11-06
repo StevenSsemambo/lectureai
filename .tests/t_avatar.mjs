@@ -174,11 +174,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   globalThis.localStorage = { getItem: (k) => (store.has(k) ? store.get(k) : null), setItem: (k, v) => store.set(k, String(v)), removeItem: (k) => store.delete(k) };
   globalThis.window = { location: { search: "" }, dispatchEvent: (e) => events.push(e.type), addEventListener() {}, removeEventListener() {} };
   globalThis.Event = class { constructor(t) { this.type = t; } };
-  ok(getAvatarEnabled() === false, "the face is OFF by default");
-  setAvatarEnabled(true); ok(getAvatarEnabled() === true && events.includes("semai-avatar-switch"), "switching on is remembered and announced to the app");
-  setAvatarEnabled(false); ok(getAvatarEnabled() === false, "switching off is remembered");
+  ok(getAvatarEnabled() === true, "the face is ON by default");
+  setAvatarEnabled(false); setAvatarEnabled(true); ok(getAvatarEnabled() === true && events.includes("semai-avatar-switch"), "switching off then on is remembered and announced to the app");
+  setAvatarEnabled(false); ok(getAvatarEnabled() === false, "switching off is remembered (and stays off)");
   globalThis.localStorage = { getItem() { throw new Error("blocked"); }, setItem() { throw new Error("blocked"); } };
-  ok(getAvatarEnabled() === false && (setAvatarEnabled(true), true), "storage blocked: off, and no error");
+  ok(getAvatarEnabled() === true && (setAvatarEnabled(false), true), "storage blocked: default (on), and no error");
   delete globalThis.localStorage; delete globalThis.window; delete globalThis.Event;
 }
 

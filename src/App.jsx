@@ -3510,7 +3510,7 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
   const avatarRailRef = useRef(null);
   const avatarInlineRef = useRef(null);
   const avatarSlots = useMemo(() => ({ rail: avatarRailRef, inline: avatarInlineRef }), []);
-  const avatarEnabled = useAvatarEnabled(); // master switch in the Voice panel (off by default)
+  const avatarEnabled = useAvatarEnabled(); // master switch in the Voice panel (on by default)
   const avatarOn = camOn && avatarEnabled && !avatarFailed;
   useEffect(() => { if (!camOn) setAvatarFailed(false); }, [camOn]); // switching the camera off and on tries again
   const [interrupted, setInterrupted] = useState(false);

@@ -1,5 +1,5 @@
 // A master switch for the lecturer's face, kept on this device. OFF means the face code is never even downloaded and the
-// lecture runs exactly as it did before the face existed. Default: off until the face is proven on the student's phone.
+// lecture runs exactly as it did before the face existed. Default: ON (the face shows when the camera icon is on).
 //   Voice panel  → "Show the lecturer's face"      address bar → ?avatar=on / ?avatar=off  (remembered)
 import { useEffect, useState } from "react";
 
@@ -18,7 +18,7 @@ function applyUrlOnce() {
 
 export function getAvatarEnabled() {
   applyUrlOnce();
-  try { return localStorage.getItem(KEY) === "on"; } catch (e) { return false; }
+  try { return localStorage.getItem(KEY) !== "off"; } catch (e) { return true; }
 }
 
 export function setAvatarEnabled(on) {
