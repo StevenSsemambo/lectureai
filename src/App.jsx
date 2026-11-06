@@ -4063,6 +4063,7 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
       return new Promise((resolve) => {
         activeResolveRef.current = resolve;
         const chosen = chooseVoice(window.speechSynthesis.getVoices(), voicePrefsRef.current, (typeof navigator !== "undefined" && navigator.language) || "en");
+        const seenTroubles = []; // so the banner can say WHICH kind of failure the phone's voice had
         speakWithBrowserVoice(window.speechSynthesis, SpeechSynthesisUtterance, speakText, {
           rate: voicePrefsRef.current.rate || 1,
           voice: chosen,
@@ -4075,7 +4076,11 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
           onTrouble: (kind) => {
             logTiming("tts_trouble", { provider: "browser", client_ms: Math.round(performance.now() - tSpeak), chars: text.length, extra: { kind } });
             avatarBus.trouble(kind); // (only shown in the ?lipdebug box: which kind of failure the voice had)
-            if (kind === "gave-up") setTtsNotice("The browser voice stopped responding, so the lecturer is continuing on screen. Reloading the page usually brings it back.");
+            seenTroubles.push(kind);
+            if (kind === "gave-up") {
+              const vname = chosen ? `${chosen.name}${chosen.localService ? " (on the phone)" : " (online)"}` : "no voice chosen";
+              setTtsNotice(`The browser voice stopped responding, so the lecturer is continuing on screen. Reloading the page usually brings it back. [${seenTroubles.slice(0, -1).join(", ") || "no detail"} · ${vname}]`);
+            }
           },
         }).then((finished) => {
           avatarBus.end();
