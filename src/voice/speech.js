@@ -169,3 +169,21 @@ export function remainingFrom(text, frac) {
   }
   return sentences[sentences.length - 1].trim();
 }
+
+// Speaks with the chosen voice. If that voice made no sound at all (every piece "finished" instantly, or it gave up before
+// anything started), speaks the same text again with the device's default voice, so one dead voice saved in the student's
+// settings cannot silence the lecture. o.onVoiceFallback() is called once when that happens. Never loops: one retry only.
+export async function speakWithVoiceFallback(synth, Utter, text, o = {}) {
+  const seen = [];
+  let startedAny = false;
+  const first = await speakWithBrowserVoice(synth, Utter, text, {
+    ...o,
+    onStart: () => { startedAny = true; try { o.onStart && o.onStart(); } catch (e) { /* ignore */ } },
+    onTrouble: (k) => { seen.push(k); try { o.onTrouble && o.onTrouble(k); } catch (e) { /* ignore */ } },
+  });
+  const nothingHeard = seen.includes("silent") || (seen.includes("gave-up") && !startedAny);
+  if (first !== true || !o.voice || !nothingHeard) return first;
+  if ((o.shouldStop || (() => false))()) return false;
+  try { o.onVoiceFallback && o.onVoiceFallback(); } catch (e) { /* ignore */ }
+  return speakWithBrowserVoice(synth, Utter, text, { ...o, voice: null });
+}

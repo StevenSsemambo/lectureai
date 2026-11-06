@@ -34,7 +34,7 @@ import { createConversation, recordExchange, conversationBlock, avoidOpenings } 
 import { extractAnswer, createChunker, createSSEParser, trimToSentence, continuesFrom } from "./persona/streaming.js";
 import { milestoneFor, milestoneLine, MAX_MILESTONES_PER_LECTURE } from "./persona/milestones.js";
 import { FEEL_CHOICES, feelThanks } from "./persona/feel.js";
-import { speakWithBrowserVoice, remainingFrom } from "./voice/speech.js";
+import { speakWithVoiceFallback, remainingFrom } from "./voice/speech.js";
 import AvatarGate from "./avatar/AvatarGate.jsx";
 import { useAvatarEnabled } from "./avatar/avatarSwitch.js";
 import { avatarBus } from "./avatar/avatarBus.js";
@@ -3560,6 +3560,7 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
   const [ttsNotice, setTtsNotice] = useState("");
   // Student voice choices (speed, male/female, specific voice), remembered on this device.
   const [voicePrefs, setVoicePrefs] = useState(loadVoicePrefs);
+  const defaultVoiceOnlyRef = useRef(false); // set when the voice the student picked made no sound: use the device default until they pick again
   const voicePrefsRef = useRef(voicePrefs);
   const [voices, setVoices] = useState([]);
   const [voiceOpen, setVoiceOpen] = useState(false);
@@ -4065,17 +4066,22 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
       // and a dropped piece used to leave the lecture "talking" in silence.
       return new Promise((resolve) => {
         activeResolveRef.current = resolve;
-        const chosen = chooseVoice(window.speechSynthesis.getVoices(), voicePrefsRef.current, (typeof navigator !== "undefined" && navigator.language) || "en");
+        const chosen = defaultVoiceOnlyRef.current ? null : chooseVoice(window.speechSynthesis.getVoices(), voicePrefsRef.current, (typeof navigator !== "undefined" && navigator.language) || "en");
         const seenTroubles = []; // so the banner can say WHICH kind of failure the phone's voice had
-        speakWithBrowserVoice(window.speechSynthesis, SpeechSynthesisUtterance, speakText, {
+        const vkey = () => (defaultVoiceOnlyRef.current ? "device-default" : chosen && (chosen.voiceURI || chosen.name)); // which voice is really speaking (the face learns its speed)
+        speakWithVoiceFallback(window.speechSynthesis, SpeechSynthesisUtterance, speakText, {
           rate: voicePrefsRef.current.rate || 1,
           voice: chosen,
           onStart: () => markStart("browser"),
-          onPiece: (i, n, pieceText) => avatarBus.piece(pieceText, voicePrefsRef.current.rate || 1, chosen && (chosen.voiceURI || chosen.name)),
-          onPieceStart: (i, pieceText) => avatarBus.pieceStart(pieceText, voicePrefsRef.current.rate || 1, chosen && (chosen.voiceURI || chosen.name)),
+          onPiece: (i, n, pieceText) => avatarBus.piece(pieceText, voicePrefsRef.current.rate || 1, vkey()),
+          onPieceStart: (i, pieceText) => avatarBus.pieceStart(pieceText, voicePrefsRef.current.rate || 1, vkey()),
           onBoundary: (i, charIndex, kind) => avatarBus.boundary(charIndex, kind),
           onPieceEnd: () => avatarBus.pieceEnd(),
           shouldStop: () => !stillMine(),
+          onVoiceFallback: () => {
+            defaultVoiceOnlyRef.current = true;
+            setTtsNotice("The voice you picked made no sound, so the lecturer is using the device's default voice. You can choose another in the Voice panel.");
+          },
           onTrouble: (kind) => {
             logTiming("tts_trouble", { provider: "browser", client_ms: Math.round(performance.now() - tSpeak), chars: text.length, extra: { kind } });
             avatarBus.trouble(kind); // (only shown in the ?lipdebug box: which kind of failure the voice had)
@@ -5202,7 +5208,7 @@ ${NATURAL_SPEECH_STYLE}`;
         open={voiceOpen}
         onClose={() => setVoiceOpen(false)}
         prefs={voicePrefs}
-        onChange={(p) => setVoicePrefs(p)}
+        onChange={(p) => { defaultVoiceOnlyRef.current = false; setVoicePrefs(p); }}
         voices={voices}
         lang={voiceLang}
         canPreview={paused || lecturerState === "idle"}
