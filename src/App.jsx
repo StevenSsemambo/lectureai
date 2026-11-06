@@ -4057,7 +4057,10 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
       }
 
       onDurationKnown && onDurationKnown(estimateSpeechDurationMs(speakText));
-      if (!window.speechSynthesis) return true;
+      if (!window.speechSynthesis) {
+        setTtsNotice("This browser has no built-in voice, so the lecturer is continuing on screen. Try Chrome, or add an ElevenLabs key in settings.");
+        return true;
+      }
       // Spoken in short watched pieces (see voice/speech.js): a long paragraph in one go is cut off by Chrome after ~15 s,
       // and a dropped piece used to leave the lecture "talking" in silence.
       return new Promise((resolve) => {
@@ -4077,7 +4080,9 @@ function LectureRoomInner({ curriculum, settings, courseId, moduleId, studentNam
             logTiming("tts_trouble", { provider: "browser", client_ms: Math.round(performance.now() - tSpeak), chars: text.length, extra: { kind } });
             avatarBus.trouble(kind); // (only shown in the ?lipdebug box: which kind of failure the voice had)
             seenTroubles.push(kind);
-            if (kind === "gave-up") {
+            if (kind === "silent") {
+              setTtsNotice("The phone's voice says it finished speaking instantly but made no sound. Check Settings → Text-to-speech output (tap Listen to an example), the media volume, and Bluetooth.");
+            } else if (kind === "gave-up") {
               const vname = chosen ? `${chosen.name}${chosen.localService ? " (on the phone)" : " (online)"}` : "no voice chosen";
               setTtsNotice(`The browser voice stopped responding, so the lecturer is continuing on screen. Reloading the page usually brings it back. [${seenTroubles.slice(0, -1).join(", ") || "no detail"} · ${vname}]`);
             }

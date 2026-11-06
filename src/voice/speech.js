@@ -89,6 +89,12 @@ export async function speakWithBrowserVoice(synth, Utter, text, o = {}) {
       u.onboundary = (e) => { progress(); try { o.onBoundary && o.onBoundary(k, e && e.charIndex, e && e.name); } catch (err) { /* ignore */ } };
       u.onend = () => {
         try { o.onPieceEnd && o.onPieceEnd(k, pieces[k]); } catch (e) { /* ignore */ }
+        // "Started" and "ended" within a blink for a piece that needs seconds to say: the engine reported success but made no
+        // sound (a phone whose speech service is missing, disabled or muted does this). Treated as a failure, not as "spoken".
+        if (k === current && startedPiece.has(k) && expectedMs(pieces[k]) > 800 && Date.now() - pieceT0 < expectedMs(pieces[k]) * 0.12) {
+          finish({ status: "stuck", at: k, started: false, why: "instant" });
+          return;
+        }
         // "Ended" almost at once, without ever starting, for a piece that needs a while to say: the engine dropped it.
         if (k === current && !startedPiece.has(k) && expectedMs(pieces[k]) > 250 && Date.now() - pieceT0 < expectedMs(pieces[k]) * 0.25) {
           finish({ status: "stuck", at: k, started: false, why: "dropped" });
@@ -127,21 +133,25 @@ export async function speakWithBrowserVoice(synth, Utter, text, o = {}) {
   });
 
   let from = 0;
+  let sawInstant = false;
+  // Finished (or gave up). If any piece "finished" without making sound, say so: the lecture moves on, but never silently.
+  const finished = () => { if (sawInstant) trouble("silent"); return true; };
   while (from < pieces.length) {
     if (shouldStop()) return false;
     const r = await runQueue(from);
     if (r.status === "stopped" || shouldStop()) return false;
-    if (r.status === "done") return true;
+    if (r.status === "done") return finished();
     // Something stuck. Clear the engine, then carry on from the right place.
     cancel();
     trouble(r.why);
+    if (r.why === "instant") sawInstant = true;
     stuckInARow += 1;
-    if (stuckInARow >= 3) { trouble("gave-up"); return true; } // clearly broken: let the lecture move on, text stays on screen
+    if (stuckInARow >= 3) { trouble("gave-up"); return finished(); } // clearly broken: let the lecture move on, text stays on screen
     if (r.started || retried.has(r.at)) from = r.at + 1; // it began, or was already retried: do not repeat it again
     else { retried.add(r.at); from = r.at; }
     await sleep(cfg.retryDelayMs);
   }
-  return true;
+  return finished();
 }
 
 // When a recording dies part way (audio stalled at `frac` of its length), the rest is spoken by the browser voice.
